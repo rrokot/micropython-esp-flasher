@@ -4,6 +4,6 @@ version = "0.1.0"
 description = "Detect an ESP32 target and flash the latest stable MicroPython build"
 requires-python = ">=3.14"
 dependencies = [
-    "esptool>=5",
+    "esptool",
     "pyserial",
 ]
