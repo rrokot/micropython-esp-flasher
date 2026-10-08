@@ -178,7 +178,7 @@ function Write-Activity([string]$Label, [string]$Text, [int]$Frame, [double]$Fra
 
 function Write-Title {
     Write-Ui
-    Write-Line @('  ', 'Gray', 'mpflash', 'Cyan', '   MicroPython for ESP32', 'DarkGray')
+    Write-Line @('  ', 'Gray', 'esp32-mp-flasher', 'Cyan', '   flash stable MicroPython onto ESP32', 'DarkGray')
     Write-Line @('  ', 'Gray', ($G.H * [math]::Min((Get-Width) - 2, 60)), 'DarkGray')
     Write-Ui
 }
@@ -209,7 +209,7 @@ function Write-Failure($ErrorRecord) {
     Close-Live
     Write-Ui
     $exception = $ErrorRecord.Exception
-    if ($exception.Data['mpflash']) {
+    if ($exception.Data['expected']) {
         $lines = @($exception.Message -split "`n")
         Write-Ui "  $($G.Dot) $($lines[0])" Red
         foreach ($line in $lines[1..($lines.Count)]) {
@@ -231,7 +231,7 @@ function Write-Failure($ErrorRecord) {
 
 function Fail([string]$Message, [string]$Details = '') {
     $e = New-Object System.Exception $Message
-    $e.Data['mpflash'] = $true
+    $e.Data['expected'] = $true
     $e.Data['details'] = $Details
     throw $e
 }
@@ -391,7 +391,7 @@ function Save-Url([string]$Url, [string]$Path, [string]$Label = '') {
     $request = [System.Net.HttpWebRequest]::Create($Url)
     $request.Timeout = 10000
     $request.ReadWriteTimeout = 10000
-    $request.UserAgent = 'mpflash'
+    $request.UserAgent = 'esp32-mp-flasher'
     $response = $request.GetResponse()
     try {
         $total = $response.ContentLength
@@ -898,7 +898,7 @@ function Main {
 
 if ($MyInvocation.InvocationName -ne '.') {
     $status = 0
-    try { $Host.UI.RawUI.WindowTitle = 'mpflash' } catch {}
+    try { $Host.UI.RawUI.WindowTitle = 'esp32-mp-flasher' } catch {}
     try {
         if ($Interactive) { [Console]::CursorVisible = $false }
         if ([Console]::IsInputRedirected) { Fail 'run this from a console' }

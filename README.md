@@ -1,4 +1,4 @@
-# mpflash
+# esp32-mp-flasher
 
 Flashes a stable MicroPython build onto a connected ESP32 board.
 Uses local firmware first; checks online when no local build exists or when requested.
@@ -7,10 +7,10 @@ script plus Espressif's standalone `esptool.exe`.
 
 ## Usage
 
-Double-click `mpflash.cmd`, or:
+Double-click `esp32-mp-flasher.cmd`, or:
 
 ```
-powershell -ExecutionPolicy Bypass -File mpflash.ps1
+powershell -ExecutionPolicy Bypass -File esp32-mp-flasher.ps1
 ```
 
 It runs on the Windows PowerShell 5.1 that ships with Windows 10 and 11, and on
@@ -22,7 +22,7 @@ It finds the board, identifies the chip, works out which build belongs on it,
 prints what it is about to do and waits:
 
 ```
-  mpflash   MicroPython for ESP32
+  esp32-mp-flasher   flash stable MicroPython onto ESP32
   ────────────────────────────────────────────────────────────
 
   ● port      COM5   Silicon Labs bridge  10c4:ea60
@@ -67,7 +67,7 @@ The same order yields `SPIRAM` for classic ESP32 modules.
 Taken per chip from esptool's `CHIP_DEFS[chip].BOOTLOADER_FLASH_OFFSET`, because
 it is not uniform: ESP32 and S2 use `0x1000`, S3/C3/C6 use `0x0`, C5 and P4 use
 `0x2000`. The standalone `esptool.exe` cannot be queried for it, so the values
-are copied into the `$BootloaderOffsets` table in `mpflash.ps1`.
+are copied into the `$BootloaderOffsets` table in `esp32-mp-flasher.ps1`.
 
 ## Baud rates
 
@@ -95,7 +95,7 @@ CDC. The script waits for whichever port appears and reads the banner there.
 
 ## Offline use
 
-The script first looks in the `firmware` folder next to `mpflash.ps1`. If matching
+The script first looks in the `firmware` folder next to `esp32-mp-flasher.ps1`. If matching
 files exist, it uses the newest local stable release for each available variant
 without making any network requests. This folder travels with the script,
 and its location does not depend on the user profile or working directory.
@@ -120,6 +120,6 @@ as `.bin.part` and are never offered for flashing.
 Firmware is cached in `firmware/` next to the script. Preview builds are ignored; only
 tagged stable releases are offered.
 
-Tests need no framework: `powershell -ExecutionPolicy Bypass -File test_mpflash.ps1`.
+Tests need no framework: `powershell -ExecutionPolicy Bypass -File esp32-mp-flasher.Tests.ps1`.
 `bench.cmd` times erase and write at several baud rates over a UART bridge and
 saves the table to `bench.txt`; it erases the whole chip.
