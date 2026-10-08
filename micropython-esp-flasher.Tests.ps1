@@ -92,6 +92,17 @@ Test 'cached firmware is used without downloading it again' {
     Assert-Equal (Join-Path $Cache $BaseBuild) $path 'path'
 }
 
+Test 'the cache keeps only the newest build of each variant' {
+    $names = @('ESP32_GENERIC_S3-20250911-v1.26.1.bin', 'ESP32_GENERIC_S3-20260101-v1.27.0.bin',
+        'ESP32_GENERIC_S3-SPIRAM_OCT-20250911-v1.26.1.bin', 'ESP32_GENERIC_S3-20260102-v1.28.0-preview.bin',
+        'ESP32_GENERIC-20250911-v1.26.1.bin', 'notes.txt')
+    foreach ($name in $names) { Store $name | Out-Null }
+    Remove-OlderBuilds 'ESP32_GENERIC_S3'
+    $kept = @($names | Where-Object { $_ -ne 'ESP32_GENERIC_S3-20250911-v1.26.1.bin' })
+    Assert-Equal (($kept | Sort-Object) -join ' ') ((Get-ChildItem -LiteralPath $Cache | ForEach-Object { $_.Name } | Sort-Object) -join ' ') `
+        'only the older base build goes; the preview, the other board and other files stay'
+}
+
 Test 'download publishes only complete firmware' {
     function Save-Url($Url, $Path) { [System.IO.File]::WriteAllText($Path, 'firmware'); 8 }
     $path = Get-Firmware 'https://example.invalid/firmware' $BaseBuild

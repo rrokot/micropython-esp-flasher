@@ -36,7 +36,8 @@ problem.
 
 ## Offline
 
-Downloaded firmware is kept in the `firmware` folder and reused. Without
+Downloaded firmware is kept in the `firmware` folder and reused, the newest build
+of each variant only. Without
 internet, the newest build there counts as the latest. To prepare an offline
 computer, run the flasher once online for each kind of board, then copy the
 whole folder.

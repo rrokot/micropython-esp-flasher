@@ -1137,6 +1137,18 @@ function Select-Variant($Builds, [string]$Current = '', [string]$Guess = '') {
     $keys[(Select-Item $names 'which build?' $hints $default)]
 }
 
+# the cache keeps the newest build of each of a board's variants: an older one is never chosen
+function Remove-OlderBuilds([string]$Board) {
+    $files = @(Get-ChildItem -LiteralPath $Cache -Filter "$Board-*.bin" -File -ErrorAction SilentlyContinue)
+    $newest = @((ConvertTo-Builds $Board @($files | ForEach-Object { $_.Name })).Values | ForEach-Object { $_.Name })
+    foreach ($file in $files) {
+        if ($newest -notcontains $file.Name -and (ConvertTo-Builds $Board @($file.Name)).Count) {
+            Write-Log "removing $($file.Name), superseded"
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-Firmware([string]$Url, [string]$Name) {
     New-Item -ItemType Directory -Force -Path $Cache | Out-Null
     $path = Join-Path $Cache $Name
@@ -1366,6 +1378,7 @@ function Update-Board($Target, $Catalog) {
     Write-Ui
 
     $path = Get-Firmware $build.Url $build.Name
+    Remove-OlderBuilds $board
     # a build that keeps its files elsewhere would lose the ones on the board: only the user
     # can choose between wiping them and leaving the board as it is
     if ($answer -eq 'f' -and $Target.Running -and (Test-FilesMove $chip.Name $path $Target.Running $running $variant)) {
