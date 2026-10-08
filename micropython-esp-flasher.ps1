@@ -839,8 +839,9 @@ function Wait-Board([string[]]$Before, [string]$Previous, [int]$Timeout = 20) {
 
 # Ctrl-C until a prompt shows: a board that did reset, or is busy in boot.py or main.py, gets
 # there within a few seconds, other firmware never does. then Ctrl-B, which leaves the raw REPL
-# if a tool left it there, and prints the banner: version, board and chip. last, Ctrl-D soft
-# resets, so the code Ctrl-C stopped runs again rather than the board idling at the prompt
+# if a tool left it there, and prints the banner: version, board and chip. then the build the
+# board names itself, as in ESP32_GENERIC_S3-SPIRAM_OCT, empty before MicroPython 1.24. last,
+# Ctrl-D soft resets, so the code Ctrl-C stopped runs again rather than idling at the prompt
 function Invoke-ReplHandshake($Serial, [int]$Patience = 3000) {
     $text = ''
     $prompt = $false
@@ -855,6 +856,12 @@ function Invoke-ReplHandshake($Serial, [int]$Patience = 3000) {
     $Serial.Write([byte[]](2), 0, 1)
     $watch.Restart()
     while ($text -notmatch 'MicroPython v[^\r\n]*\r?\n[\s\S]*>>>\s*$' -and $watch.ElapsedMilliseconds -lt 1000) {
+        Start-Sleep -Milliseconds 50
+        $text += $Serial.ReadExisting()
+    }
+    $Serial.Write("import sys;print('build:'+getattr(sys.implementation,'_build',''))`r")
+    $watch.Restart()
+    while ($text -notmatch 'build:[\w-]*\r?\n' -and $watch.ElapsedMilliseconds -lt 1000) {
         Start-Sleep -Milliseconds 50
         $text += $Serial.ReadExisting()
     }
@@ -911,9 +918,9 @@ function Get-Chip([string]$Port, [switch]$Optional) {
         Write-Step fail 'chip' 'no answer from the bootloader'
         Fail 'could not identify the chip, esptool said:' $out
     }
-    # some packages say "Embedded PSRAM" without a size, the ESP32-PICO-V3-02 for one
+    # a feature of its own, not "No Embedded PSRAM"; the ESP32-PICO-V3-02 gives no size
     $features = [regex]::Match($out, 'Features:\s*([^\r\n]*)').Groups[1].Value
-    $psram = [regex]::Match($features, 'Embedded PSRAM(?: (\d+)MB)?')
+    $psram = [regex]::Match($features, '(?:^|,\s*)Embedded PSRAM(?: (\d+)MB)?')
     $flash = [regex]::Match($out, 'Detected flash size:\s*(\S+)')
     $mac = [regex]::Match($out, 'MAC:\s*([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5,7})')
     $chip = [pscustomobject]@{
@@ -1004,15 +1011,16 @@ function Get-HardwareNames($Chip) {
         @(if ($Chip.Psram) { 'SPIRAM' }) + @(if ($Chip.PsramMb -ge 8) { 'SPIRAM_OCT' })
 }
 
-# the build for this hardware, decided by the hardware alone: the variant it names, the longest
-# name when it names several, the base build when it names none. variants the site no longer
-# builds for its latest release are out; cached builds all count, being what was downloaded
-function Get-VariantGuess($Builds, $Chip) {
+# the build for a board: the variant it runs, when it runs MicroPython and names it (see
+# Invoke-ReplHandshake); otherwise the variant its hardware names, the longest when it names
+# several, the base build when it names none. variants the site no longer builds for its latest
+# release are out; cached builds all count, being what was downloaded
+function Get-VariantGuess($Builds, $Chip, $Running = $null) {
     $latest = ($Builds.Values | Sort-Object Key | Select-Object -Last 1).Version
+    $available = @($Builds.Keys | Where-Object { -not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest })
+    if ($null -ne $Running -and $available -contains $Running) { return $Running }
     $names = Get-HardwareNames $Chip
-    $fits = @($Builds.Keys | Where-Object {
-            $_ -and $names -contains $_ -and (-not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest)
-        } | Sort-Object Length -Descending)
+    $fits = @($available | Where-Object { $_ -and $names -contains $_ } | Sort-Object Length -Descending)
     if ($fits) { $fits[0] } else { '' }
 }
 
@@ -1124,11 +1132,16 @@ function Format-Written([string]$Output) {
     [string]::Format($Inv, '{0} in {1:0.0} s', (Format-Size ([double]$m.Groups[1].Value)), [double]$m.Groups[2].Value)
 }
 
-# "MicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3"
+# "MicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3",
+# then "build:ESP32_GENERIC_S3-SPIRAM_OCT" from the handshake's question
 function Get-BannerInfo([string]$Banner) {
     $m = [regex]::Match($Banner, 'MicroPython v(\S+)(?: on [^;\r\n]*;\s*([^\r\n]*?)(?: with ESP(?:32|8266)\S*)?)?\s*(?:\r|\n|$)')
     if (-not $m.Success) { return $null }
-    [pscustomobject]@{ Version = $m.Groups[1].Value; Machine = $m.Groups[2].Value.Trim() }
+    [pscustomobject]@{
+        Version = $m.Groups[1].Value
+        Machine = $m.Groups[2].Value.Trim()
+        Build   = [regex]::Match($Banner, 'build:([\w-]*)\r?\n').Groups[1].Value
+    }
 }
 
 function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase) {
@@ -1186,6 +1199,7 @@ function Find-Boards([object[]]$Ports, [string[]]$Skipped = @(), [switch]$Option
             Port    = $port
             Chip    = $chip
             Version = $(if ($current) { $current.Version } else { '' })
+            Build   = $(if ($current) { $current.Build } else { '' })
         }
     }
     $boards
@@ -1203,9 +1217,11 @@ function Update-Board($Target, $Catalog) {
         $Catalog[$board] = Get-Builds $board
     }
     $builds = $Catalog[$board]
-    $guess = Get-VariantGuess $builds $chip
+    # the variant it runs, when the build it names is this board's: ESP32_GENERIC_S3-SPIRAM_OCT
+    $running = if ($Target.Build -match "^$([regex]::Escape($board))(?:-(.+))?$") { [string]$Matches[1] } else { $null }
+    $guess = Get-VariantGuess $builds $chip $running
     Write-Log ("$port $($chip.Type): $($chip.Features); flash $($chip.FlashSize), PSRAM $($chip.Psram) " +
-        "$($chip.PsramMb)MB, MAC $($chip.Mac), running '$($Target.Version)', variant guess '$guess'")
+        "$($chip.PsramMb)MB, MAC $($chip.Mac), running $($Target.Version) '$($Target.Build)', variant guess '$guess'")
     $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
         Write-Note "the build $port needs is not available, pick one"

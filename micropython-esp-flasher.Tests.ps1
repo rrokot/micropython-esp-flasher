@@ -349,7 +349,7 @@ Test 'the variant follows the hardware, whatever the chip' {
         @($s3, 'ESP32-S3', 'ESP32-S3 (QFN56) (revision v0.2)', "$s3Features, Embedded PSRAM 8MB (AP_3v3)", '16MB', 'SPIRAM_OCT', 's3 R8'),
         @($s3, 'ESP32-S3', 'ESP32-S3 (QFN56) (revision v0.2)', "$s3Features, Embedded PSRAM 2MB (AP_3v3)", '8MB', '', 's3 R2, quad'),
         @($esp32, 'ESP32', 'ESP32-D0WD-V3 (revision v3.1)', $esp32Features, '4MB', '', 'esp32 plain'),
-        @($esp32, 'ESP32', 'ESP32-D0WDR2-V3 (revision v3.1)', "$esp32Features, Embedded PSRAM 2MB", '4MB', 'SPIRAM', 'esp32 with psram'),
+        @($esp32, 'ESP32', 'ESP32-D0WDR2-V3 (revision v3.1)', $esp32Features, '4MB', '', 'd0wdr2-v3, psram esptool does not report'),
         @($esp32, 'ESP32', 'ESP32-PICO-V3-02 (revision v3.0)', "$esp32Features, Embedded Flash, Embedded PSRAM", '8MB', 'SPIRAM', 'pico-v3-02, psram without a size'),
         @($esp32, 'ESP32', 'ESP32-D0WD (revision v1.0)', 'Wi-Fi, BT, Single Core + LP Core, 160MHz', '4MB', 'UNICORE', 'esp32 single core'),
         @($esp32, 'ESP32', 'ESP32-D2WD (revision v1.0)', 'Wi-Fi, BT, Dual Core + LP Core, 160MHz, Embedded Flash', '2MB', 'D2WD', 'esp32-d2wd')
@@ -361,6 +361,22 @@ Test 'the variant follows the hardware, whatever the chip' {
     $cached = New-Catalog 'ESP8266_GENERIC' @('', 'FLASH_1M') @{ FLASH_1M = '1.28.0' } -Cached
     $chip = New-TestChip 'ESP8266' 'ESP8266EX' 'Wi-Fi, 160MHz' '1MB'
     Assert-Equal 'FLASH_1M' (Get-VariantGuess $cached $chip) 'an older cached build still fits the flash'
+    $s2 = New-TestChip 'ESP32-S2' 'ESP32-S2 (revision v0.0)' 'Wi-Fi, Single Core, 240MHz, No Embedded Flash, No Embedded PSRAM' '4MB'
+    Assert-Equal 'False' $s2.Psram 'no embedded psram is no psram'
+}
+
+Test 'a board running micropython keeps the variant it runs' {
+    $esp32 = New-Catalog 'ESP32_GENERIC' @('', 'D2WD', 'OTA', 'SPIRAM', 'UNICORE')
+    $s3 = New-Catalog 'ESP32_GENERIC_S3' @('', 'FLASH_4M', 'SPIRAM_OCT') @{ FLASH_4M = '1.25.0' }
+    $wrover = New-TestChip 'ESP32' 'ESP32-D0WD-V3 (revision v3.1)' 'Wi-Fi, BT, Dual Core + LP Core, 240MHz' '4MB'
+    $r8 = New-TestChip 'ESP32-S3' 'ESP32-S3 (QFN56) (revision v0.2)' 'Wi-Fi, Embedded PSRAM 8MB (AP_3v3)' '8MB'
+    $plain = New-TestChip 'ESP32-S3' 'ESP32-S3 (QFN56) (revision v0.2)' 'Wi-Fi' '4MB'
+    Assert-Equal 'SPIRAM' (Get-VariantGuess $esp32 $wrover 'SPIRAM') 'external psram, known only to the build it runs'
+    Assert-Equal '' (Get-VariantGuess $esp32 $wrover $null) 'nothing running: the hardware decides'
+    Assert-Equal '' (Get-VariantGuess $s3 $r8 '') 'the base build it runs'
+    Assert-Equal 'SPIRAM_OCT' (Get-VariantGuess $s3 $r8 $null) 'hardware alone'
+    Assert-Equal '' (Get-VariantGuess $s3 $plain 'FLASH_4M') 'a variant no longer built falls to the hardware'
+    Assert-Equal 'SPIRAM_OCT' (Get-VariantGuess $s3 $r8 'NOT_A_VARIANT') 'an unknown variant falls to the hardware'
 }
 
 Test 'esp8266 reports its flash size and banner' {
@@ -398,17 +414,24 @@ Test 'images are written where they belong, esp8266 with the flash size detected
     Assert-Equal 0 $calls.Count 'nothing erased when the image cannot be placed'
 }
 
-# a serial port whose board sends $Chunks, one per read, and the banner once Ctrl-B arrives
-function New-FakeSerial([string[]]$Chunks, [string]$Banner = '') {
-    $state = @{ Reads = 0; CtrlB = $false; BannerSent = $false; Sent = New-Object System.Collections.Generic.List[byte] }
-    $serial = [pscustomobject]@{ State = $state; Chunks = $Chunks; Banner = $Banner }
+# a serial port whose board sends $Chunks, one per read, the banner once Ctrl-B arrives, and its
+# build name once asked for it
+function New-FakeSerial([string[]]$Chunks, [string]$Banner = '', [string]$Build = 'ESP32_GENERIC_S3') {
+    $state = @{ Reads = 0; CtrlB = $false; BannerSent = $false; Asked = $false; BuildSent = $false
+        Sent = New-Object System.Collections.Generic.List[byte] }
+    $serial = [pscustomobject]@{ State = $state; Chunks = $Chunks; Banner = $Banner; Build = $Build }
     $serial | Add-Member ScriptMethod Write {
         param($Bytes, $Offset, $Count)
+        if ($Bytes -is [string]) { $this.State.Asked = $Bytes -match '_build'; return }
         $this.State.Sent.AddRange([byte[]]$Bytes)
         if ($Bytes -contains 2) { $this.State.CtrlB = $true }
     }
     $serial | Add-Member ScriptMethod ReadExisting {
         if ($this.State.CtrlB -and -not $this.State.BannerSent) { $this.State.BannerSent = $true; return $this.Banner }
+        if ($this.State.Asked -and -not $this.State.BuildSent) {
+            $this.State.BuildSent = $true
+            return "import sys;print('build:'+getattr(sys.implementation,'_build',''))`r`nbuild:$($this.Build)`r`n>>> "
+        }
         $i = $this.State.Reads++
         if ($i -lt $this.Chunks.Count) { $this.Chunks[$i] } else { '' }
     }
@@ -422,11 +445,14 @@ Test 'the repl is reached even when opening the port reset the board' {
         "boot-WARNING - Boot start: reset_cause=1`r`n", '',
         "Traceback (most recent call last):`r`n  File `"boot.py`", line 549, in <module>`r`nKeyboardInterrupt: `r`n$banner") $banner
     $info = Get-BannerInfo (Invoke-ReplHandshake $reset)
-    Assert-Equal '1.29.0|Generic ESP32S3 module' "$($info.Version)|$($info.Machine)" 'after a reset and a busy boot.py'
+    Assert-Equal '1.29.0|Generic ESP32S3 module|ESP32_GENERIC_S3' "$($info.Version)|$($info.Machine)|$($info.Build)" 'after a reset and a busy boot.py'
     Assert-Equal 4 $reset.State.Sent[-1] 'soft reset last, so the stopped code runs again'
 
-    $raw = New-FakeSerial @("raw REPL; CTRL-B to exit`r`n>") $banner
-    Assert-Equal '1.29.0' (Get-BannerInfo (Invoke-ReplHandshake $raw)).Version 'left in raw REPL'
+    $raw = New-FakeSerial @("raw REPL; CTRL-B to exit`r`n>") $banner 'ESP32_GENERIC_S3-SPIRAM_OCT'
+    $info = Get-BannerInfo (Invoke-ReplHandshake $raw)
+    Assert-Equal '1.29.0|ESP32_GENERIC_S3-SPIRAM_OCT' "$($info.Version)|$($info.Build)" 'left in raw REPL'
+    $old = New-FakeSerial @("`r`n>>> ") "`r`nMicroPython v1.22.0 on 2023-12-27; Generic ESP32 module with ESP32`r`n>>> " ''
+    Assert-Equal '1.22.0|' "$((Get-BannerInfo (Invoke-ReplHandshake $old)).Version)|$((Get-BannerInfo (Invoke-ReplHandshake $old)).Build)" 'no build name before 1.24'
 
     $other = New-FakeSerial @('sensor 21.5C', "`r`nsensor 21.6C`r`n", 'sensor 21.6C') $banner
     $text = Invoke-ReplHandshake $other -Patience 200
