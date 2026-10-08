@@ -325,32 +325,46 @@ function New-Catalog([string]$Board, [string[]]$Variants, [hashtable]$Older = @{
     $builds
 }
 
+# the chip as Get-Chip reads it from esptool's report
+function New-TestChip([string]$Family, [string]$Type, [string]$Features, [string]$Size) {
+    function Invoke-Esptool { [pscustomobject]@{ Code = 0; Seconds = 1; Output = (New-FlashId $Family $Type $Features 'aa:bb:cc:dd:ee:ff' $Size) } }
+    Get-Chip 'COM5'
+}
+
 Test 'the variant follows the hardware, whatever the chip' {
     $esp8266 = New-Catalog 'ESP8266_GENERIC' @('', 'FLASH_1M', 'FLASH_2M_ROMFS', 'FLASH_512K', 'OTA') @{ OTA = '1.27.0' }
     $c2 = New-Catalog 'ESP32_GENERIC_C2' @('', 'FLASH_2M')
     $s3 = New-Catalog 'ESP32_GENERIC_S3' @('', 'FLASH_4M', 'SPIRAM_OCT') @{ FLASH_4M = '1.25.0' }
     $esp32 = New-Catalog 'ESP32_GENERIC' @('', 'D2WD', 'OTA', 'SPIRAM', 'UNICORE')
+    $s3Features = 'Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz'
+    $esp32Features = 'Wi-Fi, BT, Dual Core + LP Core, 240MHz, Vref calibration in eFuse, Coding Scheme None'
     $octal = 'MicroPython v1.28.0 on 2026-04-02; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3'
     $cases = @(
-        @($esp8266, '', 0, '4MB', '', 'esp8266 4MB'),
-        @($esp8266, '', 0, '2MB', '', 'esp8266 2MB'),
-        @($esp8266, '', 0, '1MB', 'FLASH_1M', 'esp8266 1MB'),
-        @($esp8266, '', 0, '512KB', 'FLASH_512K', 'esp8266 512KB'),
-        @($c2, '', 0, '2MB', 'FLASH_2M', 'c2 2MB'),
-        @($c2, '', 0, '4MB', '', 'c2 4MB'),
-        @($s3, '', 0, '4MB', '', 's3 4MB, FLASH_4M no longer built'),
-        @($s3, '', 8, '16MB', 'SPIRAM_OCT', 's3 R8'),
-        @($s3, '', 2, '8MB', '', 's3 R2, quad'),
-        @($s3, $octal, 0, '8MB', 'SPIRAM_OCT', 's3 octal by banner'),
-        @($esp32, '', 0, '4MB', '', 'esp32 plain'),
-        @($esp32, '', 2, '4MB', 'SPIRAM', 'esp32 with psram'),
-        @($esp32, 'MicroPython v1.28.0 on 2026-04-02; Generic ESP32 module with SPIRAM with ESP32', 0, '4MB', 'SPIRAM', 'esp32 spiram by banner')
+        @($esp8266, 'ESP8266', 'ESP8266EX', 'Wi-Fi, 160MHz', '4MB', '', '', 'esp8266 4MB'),
+        @($esp8266, 'ESP8266', 'ESP8266EX', 'Wi-Fi, 160MHz', '2MB', '', '', 'esp8266 2MB'),
+        @($esp8266, 'ESP8266', 'ESP8266EX', 'Wi-Fi, 160MHz', '1MB', '', 'FLASH_1M', 'esp8266 1MB'),
+        @($esp8266, 'ESP8266', 'ESP8266EX', 'Wi-Fi, 160MHz', '512KB', '', 'FLASH_512K', 'esp8266 512KB'),
+        @($c2, 'ESP32-C2', 'ESP32-C2 (revision v1.0)', 'Wi-Fi, BT 5 (LE), Single Core, 120MHz', '2MB', '', 'FLASH_2M', 'c2 2MB'),
+        @($c2, 'ESP32-C2', 'ESP32-C2 (revision v1.0)', 'Wi-Fi, BT 5 (LE), Single Core, 120MHz', '4MB', '', '', 'c2 4MB'),
+        @($s3, 'ESP32-S3', 'ESP32-S3 (QFN56) (revision v0.2)', $s3Features, '4MB', '', '', 's3 4MB, FLASH_4M no longer built'),
+        @($s3, 'ESP32-S3', 'ESP32-S3 (QFN56) (revision v0.2)', "$s3Features, Embedded PSRAM 8MB (AP_3v3)", '16MB', '', 'SPIRAM_OCT', 's3 R8'),
+        @($s3, 'ESP32-S3', 'ESP32-S3 (QFN56) (revision v0.2)', "$s3Features, Embedded PSRAM 2MB (AP_3v3)", '8MB', '', '', 's3 R2, quad'),
+        @($s3, 'ESP32-S3', 'ESP32-S3 (QFN56) (revision v0.2)', $s3Features, '8MB', $octal, 'SPIRAM_OCT', 's3 octal by banner'),
+        @($esp32, 'ESP32', 'ESP32-D0WD-V3 (revision v3.1)', $esp32Features, '4MB', '', '', 'esp32 plain'),
+        @($esp32, 'ESP32', 'ESP32-D0WDR2-V3 (revision v3.1)', "$esp32Features, Embedded PSRAM 2MB", '4MB', '', 'SPIRAM', 'esp32 with psram'),
+        @($esp32, 'ESP32', 'ESP32-PICO-V3-02 (revision v3.0)', "$esp32Features, Embedded Flash, Embedded PSRAM", '8MB', '', 'SPIRAM', 'pico-v3-02, psram without a size'),
+        @($esp32, 'ESP32', 'ESP32-D0WD-V3 (revision v3.1)', $esp32Features, '4MB',
+            'MicroPython v1.28.0 on 2026-04-02; Generic ESP32 module with SPIRAM with ESP32', 'SPIRAM', 'esp32 spiram by banner'),
+        @($esp32, 'ESP32', 'ESP32-D0WD (revision v1.0)', 'Wi-Fi, BT, Single Core + LP Core, 160MHz', '4MB', '', 'UNICORE', 'esp32 single core'),
+        @($esp32, 'ESP32', 'ESP32-D2WD (revision v1.0)', 'Wi-Fi, BT, Dual Core + LP Core, 160MHz, Embedded Flash', '2MB', '', 'D2WD', 'esp32-d2wd')
     )
     foreach ($c in $cases) {
-        Assert-Equal $c[4] (Get-VariantGuess $c[0] $c[1] $c[2] $c[3]) $c[5]
+        $chip = New-TestChip $c[1] $c[2] $c[3] $c[4]
+        Assert-Equal $c[6] (Get-VariantGuess $c[0] $chip $c[5]) $c[7]
     }
     $cached = New-Catalog 'ESP8266_GENERIC' @('', 'FLASH_1M') @{ FLASH_1M = '1.28.0' } -Cached
-    Assert-Equal 'FLASH_1M' (Get-VariantGuess $cached '' 0 '1MB') 'an older cached build still fits the flash'
+    $chip = New-TestChip 'ESP8266' 'ESP8266EX' 'Wi-Fi, 160MHz' '1MB'
+    Assert-Equal 'FLASH_1M' (Get-VariantGuess $cached $chip) 'an older cached build still fits the flash'
 }
 
 Test 'esp8266 reports its flash size and banner' {

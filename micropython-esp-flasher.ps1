@@ -22,8 +22,9 @@ $KnownDevices = @{
 }
 
 # the order ports are probed in, and the first port a board answers on is the one it is flashed
-# through: download mode, then USB-Serial/JTAG, then bridges. JTAG goes before bridges because probing through a bridge resets the chip, and with it the
-# JTAG port of a board plugged in by both cables; probing through JTAG leaves the bridge port alone
+# through: download mode, then USB-Serial/JTAG, then bridges. JTAG goes before bridges because
+# probing through a bridge resets the chip, and with it the JTAG port of a board plugged in by
+# both cables; probing through JTAG leaves the bridge port alone
 $PortRanks = @{ '303a:0002' = 0; '303a:0009' = 0; '303a:1001' = 1 }
 
 # any other Espressif USB device is a chip's own USB, so it is probed as well
@@ -95,7 +96,8 @@ function Write-Log([string]$Text) {
     if (-not $LogPath) { return }
     $lines = @(($Text -replace "`r`n", "`n" -replace "`r", "`n").TrimEnd("`n") -split "`n")
     $stamp = (Get-Date).ToString('HH:mm:ss.fff', $Inv)
-    $body = (@("$stamp  $($lines[0])") + @($lines | Select-Object -Skip 1 | ForEach-Object { "              $_" })) -join "`r`n"
+    $rest = @($lines | Select-Object -Skip 1 | ForEach-Object { "              $_" })
+    $body = (@("$stamp  $($lines[0])") + $rest) -join "`r`n"
     try {
         [System.IO.File]::AppendAllText($LogPath, $body + "`r`n", (New-Object System.Text.UTF8Encoding $false))
     } catch {
@@ -395,7 +397,8 @@ function Wait-Countdown([string]$Action, [int]$Seconds) {
             Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', $Action, 'White', " in $left s", 'Cyan',
                 '   any key or click for options', 'DarkGray') -Live
             if (Test-Pressed) {
-                Write-Log ([string]::Format($Inv, 'countdown to {0}: interrupted after {1:0.0} s', $Action, $watch.Elapsed.TotalSeconds))
+                Write-Log ([string]::Format($Inv, 'countdown to {0}: interrupted after {1:0.0} s',
+                        $Action, $watch.Elapsed.TotalSeconds))
                 return $true
             }
             Start-Sleep -Milliseconds 50
@@ -417,10 +420,12 @@ function Select-Item {
         [string[]]$Keys = @(),
         [string[]]$Colors = @(),
         [int]$Escape = -1,
+        [string]$EscapeHint = '',
         [ConsoleColor]$TitleColor = 'White',
         [switch]$Always
     )
     if (-not $Items) { Fail 'nothing to choose from' }
+    if (-not $EscapeHint) { $EscapeHint = if ($Escape -ge 0) { 'back' } else { 'quit' } }
     if ($Items.Count -eq 1 -and -not $Always) { return 0 }
     if (-not $Keys) { $Keys = @(1..$Items.Count | ForEach-Object { if ($_ -le 9) { "$_" } else { '' } }) }
     $cleared = $LiveOpen
@@ -467,7 +472,7 @@ function Select-Item {
                     }
                 }
                 Write-Line @('    ', 'Gray', "$($G.Up)$($G.Down)", 'DarkCyan', ' or mouse   ', 'DarkGray',
-                    'enter', 'DarkCyan', ' choose   ', 'DarkGray', 'esc', 'DarkCyan', $(if ($Escape -ge 0) { ' back' } else { ' quit' }), 'DarkGray')
+                    'enter', 'DarkCyan', ' choose   ', 'DarkGray', 'esc', 'DarkCyan', " $EscapeHint", 'DarkGray')
                 if ($top -lt 0) { $top = [Console]::CursorTop - $Items.Count - 1 }
                 $drawn = $selected
             }
@@ -906,16 +911,21 @@ function Get-Chip([string]$Port, [switch]$Optional) {
         Write-Step fail 'chip' 'no answer from the bootloader'
         Fail 'could not identify the chip, esptool said:' $out
     }
-    $psram = [regex]::Match($out, 'Embedded PSRAM (\d+)MB')
+    # some packages say "Embedded PSRAM" without a size, the ESP32-PICO-V3-02 for one
+    $features = [regex]::Match($out, 'Features:\s*([^\r\n]*)').Groups[1].Value
+    $psram = [regex]::Match($features, 'Embedded PSRAM(?: (\d+)MB)?')
     $flash = [regex]::Match($out, 'Detected flash size:\s*(\S+)')
     $mac = [regex]::Match($out, 'MAC:\s*([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5,7})')
     $chip = [pscustomobject]@{
         Name      = $m.Groups[1].Value
-        PsramMb   = $(if ($psram.Success) { [int]$psram.Groups[1].Value } else { 0 })
+        Type      = [regex]::Match($out, 'Chip type:\s*([^\r\n]*)').Groups[1].Value.Trim()
+        Features  = $features
+        Psram     = $psram.Success
+        PsramMb   = $(if ($psram.Groups[1].Success) { [int]$psram.Groups[1].Value } else { 0 })
         FlashSize = $(if ($flash.Success) { $flash.Groups[1].Value } else { '?' })
         Mac       = $(if ($mac.Success) { $mac.Groups[1].Value.ToLower() } else { '' })
     }
-    $psramText = if ($chip.PsramMb) { "$($chip.PsramMb)MB PSRAM" } else { 'no PSRAM' }
+    $psramText = if ($chip.PsramMb) { "$($chip.PsramMb)MB PSRAM" } elseif ($chip.Psram) { 'PSRAM' } else { 'no PSRAM' }
     Write-Step ok 'chip' $chip.Name -Detail "$($chip.FlashSize) flash $($G.Mid) $psramText"
     $chip
 }
@@ -962,7 +972,8 @@ function Get-Builds([string]$Board) {
         $html = Get-WebText "$Base/download/$Board/"
     } catch {
         $builds = Get-CachedBuilds $Board
-        Write-Log "micropython.org unreachable: $($_.Exception.Message)`ncached for ${Board}:`n$(@($builds.Values | ForEach-Object { $_.Name } | Sort-Object) -join "`n")"
+        Write-Log ("micropython.org unreachable: $($_.Exception.Message)`ncached for ${Board}:`n" +
+            (@($builds.Values | ForEach-Object { $_.Name } | Sort-Object) -join "`n"))
         if (-not $builds.Count) {
             Write-Step fail 'firmware' 'offline, nothing cached'
             Fail ("cannot reach micropython.org and no cached firmware for $Board`n" +
@@ -973,7 +984,8 @@ function Get-Builds([string]$Board) {
     }
     $names = @([regex]::Matches($html, '/resources/firmware/[^"]+\.bin') | ForEach-Object { $_.Value.Split('/')[-1] })
     $builds = ConvertTo-Builds $Board $names
-    Write-Log "$($names.Count) files listed for $Board, latest stable per variant:`n$(@($builds.Values | ForEach-Object { $_.Name } | Sort-Object) -join "`n")"
+    Write-Log ("$($names.Count) files listed for $Board, latest stable per variant:`n" +
+        (@($builds.Values | ForEach-Object { $_.Name } | Sort-Object) -join "`n"))
     if (-not $builds.Count) {
         Write-Step fail 'firmware' 'nothing published'
         Fail "no firmware published for $Board"
@@ -983,19 +995,27 @@ function Get-Builds([string]$Board) {
     $builds
 }
 
-# MicroPython names variants after the hardware they need, whatever the chip: FLASH_<size> for a
-# smaller flash, SPIRAM for PSRAM, SPIRAM_OCT for octal PSRAM; the base build covers the rest.
-# a variant the site no longer builds for the latest release is left out, its job taken over by
-# the base; cached builds all count, since an older one there is simply what was downloaded
-function Get-VariantGuess($Builds, [string]$Banner, [int]$PsramMb, [string]$FlashSize) {
+# MicroPython names variants after the hardware they need, whatever the chip: the package
+# (ESP32-D2WD gets D2WD), UNICORE for a single core, FLASH_<size> for a smaller flash, SPIRAM for
+# PSRAM, SPIRAM_OCT for octal PSRAM; the base build covers the rest. a variant the site no
+# longer builds for the latest release is left out, its job taken over by the base; cached
+# builds all count, since an older one there is simply what was downloaded
+function Get-VariantGuess($Builds, $Chip, [string]$Banner = '') {
     $latest = ($Builds.Values | Sort-Object Key | Select-Object -Last 1).Version
-    $current = @($Builds.Keys | Where-Object { -not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest })
+    $current = @($Builds.Keys | Where-Object { $_ -and (-not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest) })
+    # "ESP32-D2WD (revision v1.0)" names its package; the base build would not fit its flash
+    $package = @($Chip.Type -split '[-\s()]+' | Where-Object { $current -contains $_ })
+    if ($package) { return $package[0] }
+    # a dual-core build does not start on a single core
+    if ($Chip.Features -match '\bSingle Core\b' -and $current -contains 'UNICORE') { return 'UNICORE' }
     # esptool says 512KB or 4MB, MicroPython FLASH_512K or FLASH_4M
-    $flash = 'FLASH_' + ($FlashSize -replace 'B$', '')
+    $flash = 'FLASH_' + ($Chip.FlashSize -replace 'B$', '')
     if ($current -contains $flash) { return $flash }
     # embedded PSRAM of 8MB and up is octal, as in the R8 and R16 modules
-    if (($Banner.Contains('Octal-SPIRAM') -or $PsramMb -ge 8) -and $current -contains 'SPIRAM_OCT') { return 'SPIRAM_OCT' }
-    if (($Banner.Contains('SPIRAM') -or $PsramMb) -and $current -contains 'SPIRAM') { return 'SPIRAM' }
+    $psram = $Chip.Psram -or $Chip.PsramMb -or $Banner.Contains('SPIRAM')
+    $octal = $Banner.Contains('Octal-SPIRAM') -or $Chip.PsramMb -ge 8
+    if ($octal -and $current -contains 'SPIRAM_OCT') { return 'SPIRAM_OCT' }
+    if ($psram -and $current -contains 'SPIRAM') { return 'SPIRAM' }
     ''
 }
 
@@ -1188,9 +1208,9 @@ function Update-Board($Target, $Catalog) {
         $Catalog[$board] = Get-Builds $board
     }
     $builds = $Catalog[$board]
-    $guess = Get-VariantGuess $builds $Target.Banner $chip.PsramMb $chip.FlashSize
-    Write-Log ("$port $($chip.Name): flash $($chip.FlashSize), PSRAM $($chip.PsramMb)MB, MAC $($chip.Mac), " +
-        "running '$($Target.Version)', variant guess '$guess'")
+    $guess = Get-VariantGuess $builds $chip $Target.Banner
+    Write-Log ("$port $($chip.Type): $($chip.Features); flash $($chip.FlashSize), PSRAM $($chip.Psram) " +
+        "$($chip.PsramMb)MB, MAC $($chip.Mac), running '$($Target.Version)', variant guess '$guess'")
     $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
         Write-Note "the build $port needs is not available, pick one"
@@ -1286,7 +1306,9 @@ function Update-Boards($Targets, $Catalog, [switch]$Alone) {
             if ($Alone) { throw }
             Write-Failure $_
             $script:BoardFailures++
-            [pscustomobject]@{ Port = $target.Port; Chip = $target.Chip.Name; From = $target.Version; To = ''; Outcome = 'failed' }
+            [pscustomobject]@{
+                Port = $target.Port; Chip = $target.Chip.Name; From = $target.Version; To = ''; Outcome = 'failed'
+            }
         }
     }
 }
@@ -1296,7 +1318,7 @@ function Select-Unprobed($Ports) {
     $items = @('close') + @($Ports | ForEach-Object { $_.Device })
     $hints = @('') + @($Ports | ForEach-Object { $_.Hint })
     $keys = @('c') + @(1..$Ports.Count | ForEach-Object { if ($_ -le 9) { "$_" } else { '' } })
-    $index = Select-Item $items 'try a port that was not probed?' $hints 0 $keys -Escape 0 -Always
+    $index = Select-Item $items 'try a port that was not probed?' $hints 0 $keys -Escape 0 -EscapeHint 'close' -Always
     if ($index -le 0) { return $null }
     $Ports[$index - 1]
 }
@@ -1316,7 +1338,8 @@ function Main {
     $left = @($found.Unprobed)
     $targets = @(Find-Boards $found.Ports $found.Skipped -Optional:($left.Count -gt 0))
     if (-not $targets -and $found.Ports -and -not $left) {
-        Fail "no ESP chip answered on $(@($found.Ports | ForEach-Object { $_.Device }) -join ', '), esptool said:" $ChipOutput
+        $tried = @($found.Ports | ForEach-Object { $_.Device }) -join ', '
+        Fail "no ESP chip answered on $tried, esptool said:" $ChipOutput
     }
 
     $catalog = @{}
@@ -1355,7 +1378,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     Write-Log "finished with status $status"
     if (-not [Console]::IsInputRedirected -and -not $Closed) {
         Write-Ui
-        if ($LogPath) { Write-Line @('  ', 'Gray', 'log  ', 'DarkGray', "logs\$(Split-Path -Leaf $LogPath)", 'Gray', '  next to the script', 'DarkGray') }
+        if ($LogPath) {
+            Write-Line @('  ', 'Gray', 'log  ', 'DarkGray', "logs\$(Split-Path -Leaf $LogPath)", 'Gray',
+                '  next to the script', 'DarkGray')
+        }
         Write-Line @('  ', 'Gray', 'press any key to close', 'DarkGray')
         [void][Console]::ReadKey($true)
     }
