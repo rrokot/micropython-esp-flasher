@@ -214,6 +214,10 @@ Test 'ports are probed download mode first, then jtag, then bridges; unknown ada
         ($found.Skipped -join ';') 'skipped'
     function Get-SerialPorts { New-Port 'COM5' 0x10C4 0xEA60; New-Port 'COM4' 0x303A 0x0009 }
     Assert-Equal 'COM4' (Find-Ports).Ports[0].Device 'download mode first'
+    function Get-SerialPorts { New-Port 'COM5' 0x10C4 0xEA60; New-Port 'COM6' 0x303A 0x1002 }
+    $found = Find-Ports
+    Assert-Equal 'COM6 COM5' (($found.Ports | ForEach-Object { $_.Device }) -join ' ') 'any other espressif usb is probed, before bridges'
+    Assert-Equal 'Espressif USB  303a:1002' $found.Ports[0].Hint 'espressif usb label'
     function Get-SerialPorts { New-Port 'COM3' 0x2341 0x0043 }
     $found = Find-Ports
     Assert-Equal '0 COM3' "$($found.Ports.Count) $($found.Unprobed[0].Device)" 'unknown adapter kept for the end'
@@ -310,15 +314,49 @@ Test 'the family comes from esptool, not from a list' {
     }
 }
 
-Test 'esp8266 gets the build for its flash size' {
-    $builds = ConvertTo-Builds 'ESP8266_GENERIC' @('ESP8266_GENERIC-20250911-v1.26.1.bin',
-        'ESP8266_GENERIC-FLASH_1M-20250911-v1.26.1.bin', 'ESP8266_GENERIC-FLASH_512K-20250911-v1.26.1.bin',
-        'ESP8266_GENERIC-OTA-20250911-v1.26.1.bin')
-    foreach ($case in @(@('4MB', ''), @('2MB', ''), @('1MB', 'FLASH_1M'), @('512KB', 'FLASH_512K'))) {
-        function Invoke-Esptool { [pscustomobject]@{ Code = 0; Seconds = 1; Output = (New-FlashId 'ESP8266' 'ESP8266EX' 'Wi-Fi, 160MHz' '5c:cf:7f:01:02:03' $case[0]) } }
-        $chip = Get-Chip 'COM5'
-        Assert-Equal $case[0] $chip.FlashSize "flash size $($case[0])"
-        Assert-Equal $case[1] (Get-VariantGuess $chip.Name '' 0 $builds $chip.FlashSize) "variant for $($case[0])"
+# the variants micropython.org offered on 2026-10-08, '' being the base build; -Cached gives the
+# same builds as found in the firmware folder instead
+function New-Catalog([string]$Board, [string[]]$Variants, [hashtable]$Older = @{}, [switch]$Cached) {
+    $builds = ConvertTo-Builds $Board @($Variants | ForEach-Object {
+            $version = if ($Older[$_]) { $Older[$_] } else { '1.29.0' }
+            if ($_) { "$Board-$_-20260824-v$version.bin" } else { "$Board-20260824-v$version.bin" }
+        })
+    if (-not $Cached) { foreach ($build in $builds.Values) { $build | Add-Member Listed $true } }
+    $builds
+}
+
+Test 'the variant follows the hardware, whatever the chip' {
+    $esp8266 = New-Catalog 'ESP8266_GENERIC' @('', 'FLASH_1M', 'FLASH_2M_ROMFS', 'FLASH_512K', 'OTA') @{ OTA = '1.27.0' }
+    $c2 = New-Catalog 'ESP32_GENERIC_C2' @('', 'FLASH_2M')
+    $s3 = New-Catalog 'ESP32_GENERIC_S3' @('', 'FLASH_4M', 'SPIRAM_OCT') @{ FLASH_4M = '1.25.0' }
+    $esp32 = New-Catalog 'ESP32_GENERIC' @('', 'D2WD', 'OTA', 'SPIRAM', 'UNICORE')
+    $octal = 'MicroPython v1.28.0 on 2026-04-02; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3'
+    $cases = @(
+        @($esp8266, '', 0, '4MB', '', 'esp8266 4MB'),
+        @($esp8266, '', 0, '2MB', '', 'esp8266 2MB'),
+        @($esp8266, '', 0, '1MB', 'FLASH_1M', 'esp8266 1MB'),
+        @($esp8266, '', 0, '512KB', 'FLASH_512K', 'esp8266 512KB'),
+        @($c2, '', 0, '2MB', 'FLASH_2M', 'c2 2MB'),
+        @($c2, '', 0, '4MB', '', 'c2 4MB'),
+        @($s3, '', 0, '4MB', '', 's3 4MB, FLASH_4M no longer built'),
+        @($s3, '', 8, '16MB', 'SPIRAM_OCT', 's3 R8'),
+        @($s3, '', 2, '8MB', '', 's3 R2, quad'),
+        @($s3, $octal, 0, '8MB', 'SPIRAM_OCT', 's3 octal by banner'),
+        @($esp32, '', 0, '4MB', '', 'esp32 plain'),
+        @($esp32, '', 2, '4MB', 'SPIRAM', 'esp32 with psram'),
+        @($esp32, 'MicroPython v1.28.0 on 2026-04-02; Generic ESP32 module with SPIRAM with ESP32', 0, '4MB', 'SPIRAM', 'esp32 spiram by banner')
+    )
+    foreach ($c in $cases) {
+        Assert-Equal $c[4] (Get-VariantGuess $c[0] $c[1] $c[2] $c[3]) $c[5]
+    }
+    $cached = New-Catalog 'ESP8266_GENERIC' @('', 'FLASH_1M') @{ FLASH_1M = '1.28.0' } -Cached
+    Assert-Equal 'FLASH_1M' (Get-VariantGuess $cached '' 0 '1MB') 'an older cached build still fits the flash'
+}
+
+Test 'esp8266 reports its flash size and banner' {
+    foreach ($size in '4MB', '512KB') {
+        function Invoke-Esptool { [pscustomobject]@{ Code = 0; Seconds = 1; Output = (New-FlashId 'ESP8266' 'ESP8266EX' 'Wi-Fi, 160MHz' '5c:cf:7f:01:02:03' $size) } }
+        Assert-Equal $size (Get-Chip 'COM5').FlashSize "flash size $size"
     }
     $info = Get-BannerInfo "MicroPython v1.26.1 on 2025-09-11; ESP module with ESP8266`r`n>>> "
     Assert-Equal '1.26.1|ESP module' "$($info.Version)|$($info.Machine)" 'banner'

@@ -26,7 +26,9 @@ $KnownDevices = @{
 # JTAG port of a board plugged in by both cables; probing through JTAG leaves the bridge port alone
 $PortRanks = @{ '303a:0002' = 0; '303a:0009' = 0; '303a:1001' = 1 }
 
+# any other Espressif USB device is a chip's own USB, so it is probed as well
 $KnownVendors = @{
+    0x303A = 'Espressif USB'
     0x0403 = 'FTDI bridge'
     0x067B = 'Prolific bridge'
     0x10C4 = 'Silicon Labs bridge'
@@ -685,6 +687,7 @@ function Format-PortIds($Port) {
 function Get-PortRank($Port) {
     $rank = $PortRanks[(Format-PortIds $Port)]
     if ($null -ne $rank) { return $rank }
+    if ($Port.VendorId -eq 0x303A) { return 1 }
     2
 }
 
@@ -876,25 +879,24 @@ function Get-Builds([string]$Board) {
         Write-Step fail 'firmware' 'nothing published'
         Fail "no firmware published for $Board"
     }
+    foreach ($build in $builds.Values) { $build | Add-Member Listed $true }
     Write-Step ok 'firmware' 'micropython.org' -Detail 'latest stable releases'
     $builds
 }
 
-function Get-VariantGuess([string]$Chip, [string]$Banner, [int]$PsramMb, $Builds, [string]$FlashSize = '') {
-    # ESP8266 builds differ by flash size: the base one needs 2MB or more
-    if ($Chip -eq 'ESP8266') {
-        if ($FlashSize -eq '512KB' -and $Builds.ContainsKey('FLASH_512K')) { return 'FLASH_512K' }
-        if ($FlashSize -eq '1MB' -and $Builds.ContainsKey('FLASH_1M')) { return 'FLASH_1M' }
-        return ''
-    }
-    if ($Banner.Contains('Octal-SPIRAM') -and $Builds.ContainsKey('SPIRAM_OCT')) { return 'SPIRAM_OCT' }
-    if ($Chip -eq 'ESP32-S3') {
-        if ($PsramMb -ge 8 -and $Builds.ContainsKey('SPIRAM_OCT')) { return 'SPIRAM_OCT' }
-        return ''
-    }
-    if ($Chip -eq 'ESP32' -and ($Banner.Contains('SPIRAM') -or $PsramMb) -and $Builds.ContainsKey('SPIRAM')) {
-        return 'SPIRAM'
-    }
+# MicroPython names variants after the hardware they need, whatever the chip: FLASH_<size> for a
+# smaller flash, SPIRAM for PSRAM, SPIRAM_OCT for octal PSRAM; the base build covers the rest.
+# a variant the site no longer builds for the latest release is left out, its job taken over by
+# the base; cached builds all count, since an older one there is simply what was downloaded
+function Get-VariantGuess($Builds, [string]$Banner, [int]$PsramMb, [string]$FlashSize) {
+    $latest = ($Builds.Values | Sort-Object Key | Select-Object -Last 1).Version
+    $current = @($Builds.Keys | Where-Object { -not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest })
+    # esptool says 512KB or 4MB, MicroPython FLASH_512K or FLASH_4M
+    $flash = 'FLASH_' + ($FlashSize -replace 'B$', '')
+    if ($current -contains $flash) { return $flash }
+    # embedded PSRAM of 8MB and up is octal, as in the R8 and R16 modules
+    if (($Banner.Contains('Octal-SPIRAM') -or $PsramMb -ge 8) -and $current -contains 'SPIRAM_OCT') { return 'SPIRAM_OCT' }
+    if (($Banner.Contains('SPIRAM') -or $PsramMb) -and $current -contains 'SPIRAM') { return 'SPIRAM' }
     ''
 }
 
@@ -1087,7 +1089,7 @@ function Update-Board($Target, $Catalog) {
         $Catalog[$board] = Get-Builds $board
     }
     $builds = $Catalog[$board]
-    $guess = Get-VariantGuess $chip.Name $Target.Banner $chip.PsramMb $builds $chip.FlashSize
+    $guess = Get-VariantGuess $builds $Target.Banner $chip.PsramMb $chip.FlashSize
     $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
         Write-Note "the build $port needs is not available, pick one"
