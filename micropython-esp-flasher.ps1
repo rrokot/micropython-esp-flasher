@@ -9,39 +9,10 @@ $Cache = Join-Path $PSScriptRoot 'firmware'
 $EsptoolDir = Join-Path $PSScriptRoot 'esptool'
 $Esptool = Join-Path $EsptoolDir 'esptool.exe'
 
-$Boards = @{
-    'ESP32'    = 'ESP32_GENERIC'
-    'ESP32-S2' = 'ESP32_GENERIC_S2'
-    'ESP32-S3' = 'ESP32_GENERIC_S3'
-    'ESP32-C2' = 'ESP32_GENERIC_C2'
-    'ESP32-C3' = 'ESP32_GENERIC_C3'
-    'ESP32-C5' = 'ESP32_GENERIC_C5'
-    'ESP32-C6' = 'ESP32_GENERIC_C6'
-    'ESP32-H2' = 'ESP32_GENERIC_H2'
-    'ESP32-P4' = 'ESP32_GENERIC_P4'
-    'ESP8266'  = 'ESP8266_GENERIC'
-}
-
-# esptool's CHIP_DEFS[chip].BOOTLOADER_FLASH_OFFSET
-$BootloaderOffsets = @{
-    'ESP32'    = 0x1000
-    'ESP32-S2' = 0x1000
-    'ESP32-S3' = 0x0
-    'ESP32-C2' = 0x0
-    'ESP32-C3' = 0x0
-    'ESP32-C5' = 0x2000
-    'ESP32-C6' = 0x0
-    'ESP32-H2' = 0x0
-    'ESP32-P4' = 0x2000
-    'ESP8266'  = 0x0
-}
-
 # extra write-flash options; MicroPython's ESP8266 guide asks esptool to size the flash itself
 $WriteOptions = @{
     'ESP8266' = @('--flash-size', 'detect')
 }
-
-$FamilyRe = '^ESP32-(S2|S3|C2|C3|C5|C6|H2|P4)\b'
 
 $KnownDevices = @{
     '303a:1001' = 'ESP32 USB-Serial/JTAG', $true
@@ -636,13 +607,46 @@ function ConvertTo-ChipArg([string]$Chip) {
     $Chip.ToLower().Replace('-', '')
 }
 
-function Format-Offset([string]$Chip) {
-    '0x{0:x}' -f $BootloaderOffsets[$Chip]
+# micropython.org names the generic builds after the chip: ESP32-C5 -> ESP32_GENERIC_C5
+function ConvertTo-BoardName([string]$Chip) {
+    $family, $member = $Chip -split '-', 2
+    if ($member) { "${family}_GENERIC_$member" } else { "${family}_GENERIC" }
 }
 
-function ConvertTo-ChipName([string]$Name) {
-    if ($Name -match '^ESP8266') { return 'ESP8266' }
-    if ($Name -match $FamilyRe) { "ESP32-$($Matches[1])" } else { 'ESP32' }
+function Format-Offset([int]$Offset) {
+    '0x{0:x}' -f $Offset
+}
+
+function Test-PartitionEntry([byte[]]$Bytes, [int]$At) {
+    $Bytes[$At] -eq 0xAA -and $Bytes[$At + 1] -eq 0x50 -and $Bytes[$At + 2] -le 1 -and
+        [BitConverter]::ToUInt32($Bytes, $At + 4) % 0x1000 -eq 0 -and [BitConverter]::ToUInt32($Bytes, $At + 8) -gt 0
+}
+
+# an ESP32 image holds the flash from the bootloader on, and the partition table always sits at
+# 0x8000, so where the table lies in the file tells where the file goes. ESP8266 boots from 0
+function Get-FlashOffset([string]$Chip, [string]$Path) {
+    if ($Chip -eq 'ESP8266') { return 0 }
+    $bytes = New-Object byte[] 0x8020
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $read = 0
+        while ($read -lt $bytes.Length) {
+            $count = $stream.Read($bytes, $read, $bytes.Length - $read)
+            if (-not $count) { break }
+            $read += $count
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    $found = @(for ($offset = 0; $offset -lt 0x8000; $offset += 0x1000) {
+            $at = 0x8000 - $offset
+            if ($at + 32 -le $read -and (Test-PartitionEntry $bytes $at)) { $offset }
+        })
+    if ($found.Count -ne 1) {
+        Fail ("cannot tell where $(Split-Path -Leaf $Path) goes in flash`n" +
+            'it has no partition table where an ESP32 image keeps one; delete it and download it again')
+    }
+    $found[0]
 }
 
 function ConvertTo-SerialPort([string]$Name, [string]$DeviceId) {
@@ -788,7 +792,8 @@ function Get-Chip([string]$Port, [switch]$Optional) {
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
         $phase = if ($attempt) { 'no answer, retrying' } else { 'connecting' }
         $out = (Invoke-Esptool $Port 'flash-id' -Label 'chip' -Phase $phase).Output
-        $m = [regex]::Match($out, 'Chip (?:is|type:)\s*(ESP(?:32|8266)\S*)')
+        # esptool names the family here (ESP32, ESP32-C5, ESP8266); "Chip type" gives the package
+        $m = [regex]::Match($out, 'Connected to (ESP[\w-]+) on ')
         if ($m.Success) { break }
         if ($attempt -eq 0) { Start-Sleep -Milliseconds 1500 }
     }
@@ -805,7 +810,7 @@ function Get-Chip([string]$Port, [switch]$Optional) {
     $flash = [regex]::Match($out, 'Detected flash size:\s*(\S+)')
     $mac = [regex]::Match($out, 'MAC:\s*([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5,7})')
     $chip = [pscustomobject]@{
-        Name      = ConvertTo-ChipName $m.Groups[1].Value
+        Name      = $m.Groups[1].Value
         PsramMb   = $(if ($psram.Success) { [int]$psram.Groups[1].Value } else { 0 })
         FlashSize = $(if ($flash.Success) { $flash.Groups[1].Value } else { '?' })
         Mac       = $(if ($mac.Success) { $mac.Groups[1].Value.ToLower() } else { '' })
@@ -958,7 +963,7 @@ function Write-Plan([string]$Port, [string]$Board, [string]$Variant, $Build, [st
     Write-Card ("$Port $($G.Mid) $Board" + $(if ($Variant) { "-$Variant" })) @(
         , @()
         , $version
-        , @('offset ', 'DarkGray', (Format-Offset $Chip), 'Gray', "   $($G.Mid)   ", 'DarkGray',
+        , @($Chip, 'Gray', "   $($G.Mid)   ", 'DarkGray',
             $(if ($cached) { 'cached' } else { 'will be downloaded' }), 'Gray')
         , @()
     )
@@ -1010,6 +1015,9 @@ function Get-BannerInfo([string]$Banner) {
 
 function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase) {
     $chipArg = ConvertTo-ChipArg $Chip
+    # read before erasing, so a file that cannot be placed leaves the board untouched
+    $offset = Format-Offset (Get-FlashOffset $Chip $Path)
+    $write = @('--chip', $chipArg, 'write-flash') + @($WriteOptions[$Chip] | Where-Object { $_ }) + @($offset, $Path)
     if ($Erase) {
         $r = Invoke-Esptool $Port '--chip', $chipArg, 'erase-flash' -Label 'erase' -Bar
         if ($r.Code) {
@@ -1019,10 +1027,9 @@ function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase)
         Write-Step ok 'erase' 'whole chip' -Detail ([string]::Format($Inv, '{0:0.0} s', $r.Seconds))
     }
     foreach ($baud in $Bauds) {
-        $write = @('--chip', $chipArg, 'write-flash') + @($WriteOptions[$Chip] | Where-Object { $_ }) + @((Format-Offset $Chip), $Path)
         $r = Invoke-Esptool $Port $write -Baud $baud -Label 'write' -Bar
         if ($r.Code -eq 0) {
-            Write-Step ok 'write' (Format-Written $r.Output) -Detail "$baud baud"
+            Write-Step ok 'write' (Format-Written $r.Output) -Detail "at $offset $($G.Mid) $baud baud"
             return $baud
         }
         Write-Step warn 'write' "$baud baud failed" -Detail 'trying slower'
@@ -1073,8 +1080,7 @@ function Update-Board($Target, $Catalog) {
     $port = $Target.Port
     $chip = $Target.Chip
     $result = [pscustomobject]@{ Port = $port; Chip = $chip.Name; From = $Target.Version; To = ''; Outcome = 'failed' }
-    $board = $Boards[$chip.Name]
-    if (-not $board) { Fail "unsupported chip on ${port}: $($chip.Name)" }
+    $board = ConvertTo-BoardName $chip.Name
 
     if (-not $Catalog.ContainsKey($board)) {
         Write-Ui

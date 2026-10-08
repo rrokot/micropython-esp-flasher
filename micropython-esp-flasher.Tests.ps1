@@ -266,52 +266,88 @@ Test 'no board at all stops with the reason' {
     Assert-Throws { Invoke-MainOn '' -Chips @{} } 'no chip on COM5'
 }
 
+# esptool 5.4 flash-id output, trimmed to the lines the flasher reads
+function New-FlashId([string]$Family, [string]$Type, [string]$Features, [string]$Mac, [string]$Size) {
+    @("Connected to $Family on COM5:", "Chip type:          $Type", "Features:           $Features",
+        "MAC:                $Mac", '', 'Flash Memory Information:', "Detected flash size: $Size") -join "`n"
+}
+
+# a firmware image as an ESP32 build lays it out: bootloader at the start, partition table at 0x8000 - offset
+function New-Image([string]$Name, [int]$Offset, [switch]$NoTable) {
+    $bytes = New-Object byte[] 0x9000
+    for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = 0xFF }
+    $bytes[0] = 0xE9
+    if (-not $NoTable) {
+        $at = 0x8000 - $Offset
+        $bytes[$at] = 0xAA; $bytes[$at + 1] = 0x50; $bytes[$at + 2] = 0; $bytes[$at + 3] = 0
+        [BitConverter]::GetBytes([uint32]0x10000).CopyTo($bytes, $at + 4)
+        [BitConverter]::GetBytes([uint32]0x1F0000).CopyTo($bytes, $at + 8)
+    }
+    $path = Join-Path $Cache $Name
+    [System.IO.File]::WriteAllBytes($path, $bytes)
+    $path
+}
+
 Test 'chip, memory and MAC are read from esptool flash-id' {
     function Invoke-Esptool {
-        [pscustomobject]@{ Code = 0; Seconds = 1; Output = @(
-                'Chip type:          ESP32-S3 (QFN56) (revision v0.2)'
-                'Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)'
-                'Crystal frequency:  40MHz'
-                'MAC:                24:58:7C:E1:23:45'
-                'Detected flash size: 16MB') -join "`n" }
+        [pscustomobject]@{ Code = 0; Seconds = 1; Output = (New-FlashId 'ESP32-S3' 'ESP32-S3 (QFN56) (revision v0.2)' `
+                    'Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)' '24:58:7c:e1:23:45' '16MB') }
     }
     $chip = Get-Chip 'COM5'
     Assert-Equal 'ESP32-S3 8 16MB 24:58:7c:e1:23:45' "$($chip.Name) $($chip.PsramMb) $($chip.FlashSize) $($chip.Mac)" 'chip'
 }
 
-Test 'esp8266 is recognised and gets the build for its flash size' {
-    function Invoke-Esptool {
-        [pscustomobject]@{ Code = 0; Seconds = 1; Output = @(
-                'Chip type:          ESP8266EX'
-                'Features:           Wi-Fi, 160MHz'
-                'Crystal frequency:  26MHz'
-                'MAC:                5C:CF:7F:01:02:03'
-                "Detected flash size: $size") -join "`n" }
+Test 'the family comes from esptool, not from a list' {
+    $cases = @(
+        @('ESP32', 'ESP32-D0WD-V3 (revision v3.1)', 'ESP32_GENERIC', 'esp32'),
+        @('ESP32-C61', 'ESP32-C61 (revision v1.0)', 'ESP32_GENERIC_C61', 'esp32c61'),
+        @('ESP8266', 'ESP8266EX', 'ESP8266_GENERIC', 'esp8266')
+    )
+    foreach ($c in $cases) {
+        function Invoke-Esptool { [pscustomobject]@{ Code = 0; Seconds = 1; Output = (New-FlashId $c[0] $c[1] 'Wi-Fi' 'aa:bb:cc:dd:ee:ff' '4MB') } }
+        $chip = Get-Chip 'COM5'
+        Assert-Equal "$($c[0]) $($c[2]) $($c[3])" "$($chip.Name) $(ConvertTo-BoardName $chip.Name) $(ConvertTo-ChipArg $chip.Name)" $c[0]
     }
+}
+
+Test 'esp8266 gets the build for its flash size' {
     $builds = ConvertTo-Builds 'ESP8266_GENERIC' @('ESP8266_GENERIC-20250911-v1.26.1.bin',
         'ESP8266_GENERIC-FLASH_1M-20250911-v1.26.1.bin', 'ESP8266_GENERIC-FLASH_512K-20250911-v1.26.1.bin',
         'ESP8266_GENERIC-OTA-20250911-v1.26.1.bin')
     foreach ($case in @(@('4MB', ''), @('2MB', ''), @('1MB', 'FLASH_1M'), @('512KB', 'FLASH_512K'))) {
-        $size = $case[0]
+        function Invoke-Esptool { [pscustomobject]@{ Code = 0; Seconds = 1; Output = (New-FlashId 'ESP8266' 'ESP8266EX' 'Wi-Fi, 160MHz' '5c:cf:7f:01:02:03' $case[0]) } }
         $chip = Get-Chip 'COM5'
-        Assert-Equal "ESP8266 $size 5c:cf:7f:01:02:03" "$($chip.Name) $($chip.FlashSize) $($chip.Mac)" "chip with $size"
-        Assert-Equal $case[1] (Get-VariantGuess $chip.Name '' 0 $builds $chip.FlashSize) "variant for $size"
+        Assert-Equal $case[0] $chip.FlashSize "flash size $($case[0])"
+        Assert-Equal $case[1] (Get-VariantGuess $chip.Name '' 0 $builds $chip.FlashSize) "variant for $($case[0])"
     }
-    Assert-Equal 'ESP8266_GENERIC 0x0 esp8266' "$($Boards['ESP8266']) $(Format-Offset 'ESP8266') $(ConvertTo-ChipArg 'ESP8266')" 'board'
     $info = Get-BannerInfo "MicroPython v1.26.1 on 2025-09-11; ESP module with ESP8266`r`n>>> "
     Assert-Equal '1.26.1|ESP module' "$($info.Version)|$($info.Machine)" 'banner'
 }
 
-Test 'esp8266 is written with the flash size detected' {
+Test 'the flash offset is read from the image itself' {
+    foreach ($offset in 0x0, 0x1000, 0x2000) {
+        Assert-Equal $offset (Get-FlashOffset 'ESP32-X' (New-Image "at-$offset.bin" $offset)) ('0x{0:x}' -f $offset)
+    }
+    Assert-Equal 0 (Get-FlashOffset 'ESP8266' (New-Image 'esp8266.bin' 0 -NoTable)) 'esp8266'
+    Assert-Throws { Get-FlashOffset 'ESP32' (New-Image 'none.bin' 0 -NoTable) } 'cannot tell where none.bin goes'
+    Assert-Throws { Get-FlashOffset 'ESP32' (Store 'short.bin') } 'cannot tell where short.bin goes'
+}
+
+Test 'images are written where they belong, esp8266 with the flash size detected' {
     $calls = New-Object System.Collections.Generic.List[string]
     function Invoke-Esptool([string]$Port, [string[]]$Arguments) {
         $calls.Add($Arguments -join ' ')
         [pscustomobject]@{ Code = 0; Seconds = 1; Output = '' }
     }
-    Invoke-Flash 'COM5' 'ESP8266' 'fw.bin' $false | Out-Null
-    Invoke-Flash 'COM5' 'ESP32-S3' 'fw.bin' $false | Out-Null
-    Assert-Equal '--chip esp8266 write-flash --flash-size detect 0x0 fw.bin' $calls[0] 'esp8266'
-    Assert-Equal '--chip esp32s3 write-flash 0x0 fw.bin' $calls[1] 'esp32-s3'
+    $esp8266 = New-Image 'a.bin' 0 -NoTable
+    $esp32 = New-Image 'b.bin' 0x1000
+    Invoke-Flash 'COM5' 'ESP8266' $esp8266 $false | Out-Null
+    Invoke-Flash 'COM5' 'ESP32' $esp32 $false | Out-Null
+    Assert-Equal "--chip esp8266 write-flash --flash-size detect 0x0 $esp8266" $calls[0] 'esp8266'
+    Assert-Equal "--chip esp32 write-flash 0x1000 $esp32" $calls[1] 'esp32'
+    $calls.Clear()
+    Assert-Throws { Invoke-Flash 'COM5' 'ESP32' (Store 'bad.bin') $true } 'cannot tell where bad.bin goes'
+    Assert-Equal 0 $calls.Count 'nothing erased when the image cannot be placed'
 }
 
 Test 'esptool progress lines are parsed' {

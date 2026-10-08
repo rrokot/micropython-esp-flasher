@@ -54,6 +54,7 @@ function Start-Bench {
     $port = Select-BridgePort
     $chip = (Get-Chip $port).Name
     $fw = Get-NewestFirmware
+    $offset = Format-Offset (Get-FlashOffset $chip $fw.FullName)
     $header = "port $port   chip $chip   image $($fw.Name)"
     Write-Step ok 'image' $fw.Name -Detail (Format-Size $fw.Length)
     $start = Select-Item @('no, quit', 'yes, start') 'this erases the whole chip, files on the board included' `
@@ -63,10 +64,10 @@ function Start-Bench {
 
     $runs = @(
         @('erase-flash', @('erase-flash'), 2000000),
-        @('write compressed 2M', @('write-flash', '0', $fw.FullName), 2000000),
-        @('write uncompressed 2M', @('write-flash', '--no-compress', '0', $fw.FullName), 2000000),
-        @('write compressed 921600', @('write-flash', '0', $fw.FullName), 921600),
-        @('write compressed 460800', @('write-flash', '0', $fw.FullName), 460800)
+        @('write compressed 2M', @('write-flash', $offset, $fw.FullName), 2000000),
+        @('write uncompressed 2M', @('write-flash', '--no-compress', $offset, $fw.FullName), 2000000),
+        @('write compressed 921600', @('write-flash', $offset, $fw.FullName), 921600),
+        @('write compressed 460800', @('write-flash', $offset, $fw.FullName), 460800)
     )
     $rows = foreach ($run in $runs) { Measure-Run $port $chip $run[0] $run[1] $run[2] }
 

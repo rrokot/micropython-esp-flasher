@@ -37,10 +37,9 @@
 <text x="244.8" y="262" fill="#16C60C" textLength="50.4" lengthAdjust="spacingAndGlyphs">update</text>
 <text x="547.2" y="262" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
 <text x="34.8" y="279" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
-<text x="60" y="279" fill="#767676" textLength="50.4" lengthAdjust="spacingAndGlyphs">offset</text>
-<text x="118.8" y="279" fill="#CCCCCC" textLength="25.2" lengthAdjust="spacingAndGlyphs">0x0</text>
-<text x="169.2" y="279" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">·</text>
-<text x="202.8" y="279" fill="#CCCCCC" textLength="50.4" lengthAdjust="spacingAndGlyphs">cached</text>
+<text x="60" y="279" fill="#CCCCCC" textLength="67.2" lengthAdjust="spacingAndGlyphs">ESP32-S3</text>
+<text x="152.4" y="279" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">·</text>
+<text x="186" y="279" fill="#CCCCCC" textLength="50.4" lengthAdjust="spacingAndGlyphs">cached</text>
 <text x="547.2" y="279" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
 <text x="34.8" y="296" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
 <text x="547.2" y="296" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
