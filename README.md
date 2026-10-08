@@ -2,16 +2,21 @@
 
 Flashes a stable MicroPython build onto a connected ESP32 board.
 Uses local firmware first; checks online when no local build exists or when requested.
-No arguments, no configuration.
+No arguments, no configuration, nothing to install: it is a Windows PowerShell
+script plus Espressif's standalone `esptool.exe`.
 
 ## Usage
 
-For the initial setup, install Python and `uv`, then run `uv sync` while online.
-After that, double-click `mpflash.cmd`, or:
+Double-click `mpflash.cmd`, or:
 
 ```
-uv run --offline --no-sync mpflash.py
+powershell -ExecutionPolicy Bypass -File mpflash.ps1
 ```
+
+It runs on the Windows PowerShell 5.1 that ships with Windows 10 and 11, and on
+PowerShell 7. On the first run it downloads the latest `esptool.exe` from
+[espressif/esptool releases](https://github.com/espressif/esptool/releases) into
+the `esptool` folder next to the script. To update esptool, delete that folder.
 
 It finds the board, identifies the chip, works out which build belongs on it,
 prints what it is about to do and waits:
@@ -49,9 +54,10 @@ The same order yields `SPIRAM` for classic ESP32 modules.
 
 ## Flash offset
 
-Read from esptool itself (`CHIP_DEFS[chip].BOOTLOADER_FLASH_OFFSET`) rather than
-hardcoded, because it is not uniform: ESP32 and S2 use `0x1000`, S3/C3/C6 use
-`0x0`, C5 and P4 use `0x2000`.
+Taken per chip from esptool's `CHIP_DEFS[chip].BOOTLOADER_FLASH_OFFSET`, because
+it is not uniform: ESP32 and S2 use `0x1000`, S3/C3/C6 use `0x0`, C5 and P4 use
+`0x2000`. The standalone `esptool.exe` cannot be queried for it, so the values
+are copied into the `$BootloaderOffsets` table in `mpflash.ps1`.
 
 ## Baud rates
 
@@ -79,7 +85,7 @@ CDC. The script waits for whichever port appears and reads the banner there.
 
 ## Offline use
 
-The script first looks in the `firmware` folder next to `mpflash.py`. If matching
+The script first looks in the `firmware` folder next to `mpflash.ps1`. If matching
 files exist, it uses the newest local stable release for each available variant
 without making any network requests. This folder travels with the script,
 and its location does not depend on the user profile or working directory.
@@ -87,17 +93,13 @@ If the guessed variant is unavailable, it selects the only available variant
 or asks you to choose. Press `u` to check for online updates; if the site is
 unreachable, it keeps using local firmware.
 
-`mpflash.cmd` uses the existing `.venv` directly, so normal launches do not ask
-`uv` to resolve or download dependencies. If there is no `.venv`, it tries
-`uv run --offline` using already cached packages. On a new computer, prepare
-Python and the dependencies with `uv sync` while online; copying `.bin` files
-alone does not install the runtime.
-
-Before going offline, install the dependencies with `uv sync`, then flash the
-board once to cache its firmware. Repeat for any other board
-or variant you need. Alternatively, copy official stable `.bin` files into the
-`firmware` folder, keeping their original filenames. Python, `uv`, and the project
-dependencies must already be installed on the offline computer.
+Before going offline, run the script once while online: that fetches
+`esptool.exe` and caches the board's firmware. Repeat for any other board or
+variant you need. Then copy the whole folder, including `esptool` and `firmware`,
+to the offline computer; nothing else needs to be installed there.
+Alternatively, put `esptool.exe` from the release zip into the `esptool` folder
+by hand and copy official stable `.bin` files into the `firmware` folder,
+keeping their original filenames.
 
 If no matching firmware is cached, the script stops with instructions to
 connect to the internet or add a firmware file. Incomplete downloads are saved
@@ -107,3 +109,7 @@ as `.bin.part` and are never offered for flashing.
 
 Firmware is cached in `firmware/` next to the script. Preview builds are ignored; only
 tagged stable releases are offered.
+
+Tests need no framework: `powershell -ExecutionPolicy Bypass -File test_mpflash.ps1`.
+`bench.cmd` times erase and write at several baud rates over a UART bridge and
+saves the table to `bench.txt`; it erases the whole chip.

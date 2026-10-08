@@ -1,3 +1,2 @@
 @echo off
-cd /d "%~dp0"
-uv run bench.py
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0bench.ps1"
