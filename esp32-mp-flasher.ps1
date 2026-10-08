@@ -43,6 +43,10 @@ $KnownDevices = @{
     '303a:4001' = 'firmware USB CDC, REPL only', $false
 }
 
+# which flashable port is tried first: a board held in download mode, then a bridge, which keeps
+# its port across resets, then USB-Serial/JTAG; adapters nobody recognises go last
+$PortRanks = @{ '303a:0002' = 0; '303a:0009' = 0; '303a:1001' = 2 }
+
 $KnownVendors = @{
     0x0403 = 'FTDI bridge'
     0x067B = 'Prolific bridge'
@@ -663,7 +667,15 @@ function Format-PortIds($Port) {
     '{0:x4}:{1:x4}' -f $Port.VendorId, $Port.ProductId
 }
 
-function Select-Port {
+function Get-PortRank($Port) {
+    $rank = $PortRanks[(Format-PortIds $Port)]
+    if ($null -ne $rank) { return $rank }
+    if ($KnownVendors[$Port.VendorId]) { return 1 }
+    3
+}
+
+# flashable ports, most likely board first; the caller moves on when a chip does not answer
+function Find-Ports {
     Write-Step wait 'port' 'looking for boards' -Live
     $ports = @(Get-SerialPorts)
     if (-not $ports) {
@@ -672,13 +684,12 @@ function Select-Port {
     }
 
     $usable = @()
-    $hints = @()
     $skipped = @()
     foreach ($p in $ports) {
         $label, $flashable = Get-PortClass $p
         if ($flashable) {
-            $usable += $p.Device
-            $hints += "$label  $(Format-PortIds $p)"
+            $usable += [pscustomobject]@{ Device = $p.Device; Hint = "$label  $(Format-PortIds $p)"; Rank = Get-PortRank $p
+                Number = [int]($p.Device -replace '\D', '') }
         } else {
             $skipped += "$($p.Device) skipped: $label"
         }
@@ -691,11 +702,7 @@ function Select-Port {
             "this board exposes only its firmware serial port`n" +
             'hold BOOT, tap RESET, release BOOT and run again')
     }
-    $index = Select-Item $usable 'which board?' $hints
-    $port = $usable[$index]
-    Write-Step ok 'port' $port -Detail $hints[$index]
-    if ($skipped) { Write-Note ($skipped -join "`n") }
-    $port
+    [pscustomobject]@{ Ports = @($usable | Sort-Object Rank, Number); Skipped = $skipped }
 }
 
 function Get-PortSnapshot {
@@ -749,7 +756,8 @@ function Read-Banner([string]$Port) {
     }
 }
 
-function Get-Chip([string]$Port) {
+# with -Next, a port that does not answer gives $null so the next one can be tried
+function Get-Chip([string]$Port, [switch]$Next) {
     $m = $null
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
         $phase = if ($attempt) { 'no answer, retrying' } else { 'connecting' }
@@ -759,6 +767,10 @@ function Get-Chip([string]$Port) {
         if ($attempt -eq 0) { Start-Sleep -Milliseconds 1500 }
     }
     if (-not $m.Success) {
+        if ($Next) {
+            Write-Step warn 'chip' "no answer on $Port" -Detail 'trying the next port'
+            return $null
+        }
         Write-Step fail 'chip' 'no answer from the bootloader'
         Fail 'could not identify the chip, esptool said:' $out
     }
@@ -991,20 +1003,28 @@ function Main {
     Write-Title
     Initialize-Input | Out-Null
     Initialize-Esptool
-    $port = Select-Port
+    $found = Find-Ports
 
-    Write-Step wait 'repl' 'listening' -Live
-    $banner = Read-Banner $port
-    $current = Get-BannerInfo $banner
-    $currentVersion = if ($current) { $current.Version } else { '' }
-    if ($current) {
-        Write-Step ok 'repl' "MicroPython $currentVersion" -Detail $current.Machine
-    } else {
-        Write-Step skip 'repl' 'no MicroPython answer' DarkGray
+    $chip = $null
+    for ($i = 0; -not $chip; $i++) {
+        $candidate = $found.Ports[$i]
+        $port = $candidate.Device
+        Write-Step ok 'port' $port -Detail $candidate.Hint
+        if ($i -eq 0 -and $found.Skipped) { Write-Note ($found.Skipped -join "`n") }
+
+        Write-Step wait 'repl' 'listening' -Live
+        $banner = Read-Banner $port
+        $current = Get-BannerInfo $banner
+        $currentVersion = if ($current) { $current.Version } else { '' }
+        if ($current) {
+            Write-Step ok 'repl' "MicroPython $currentVersion" -Detail $current.Machine
+        } else {
+            Write-Step skip 'repl' 'no MicroPython answer' DarkGray
+        }
+        Start-Sleep -Milliseconds 500
+
+        $chip = Get-Chip $port -Next:($i -lt $found.Ports.Count - 1)
     }
-    Start-Sleep -Milliseconds 500
-
-    $chip = Get-Chip $port
     $board = $Boards[$chip.Name]
     if (-not $board) { Fail "unsupported chip: $($chip.Name)" }
 

@@ -129,15 +129,24 @@ Test 'serial ports are parsed from plug and play ids' {
     Assert-Equal 'False' (Get-PortClass (ConvertTo-SerialPort 'x (COM3)' 'USB\VID_303A&PID_4001\1'))[1] 'cdc flashable'
 }
 
-# runs Main against a board whose REPL reports $Running (empty: no MicroPython); returns the flash calls
-function Invoke-MainOn([string]$Running, [string[]]$Menu = @()) {
+function New-Port([string]$Device, [int]$VendorId, [int]$ProductId) {
+    [pscustomobject]@{ Device = $Device; VendorId = $VendorId; ProductId = $ProductId }
+}
+
+# runs Main against a board whose REPL reports $Running (empty: no MicroPython) and whose chip
+# answers on $Answering; returns the flash calls
+function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports = @(New-Port 'COM5' 0x10C4 0xEA60),
+        [string]$Answering = 'COM5') {
     $flashed = New-Object System.Collections.Generic.List[object]
     $menus = New-Object System.Collections.Generic.List[string]
     $banner = if ($Running) { "MicroPython v$Running on 2026-01-01; Generic ESP32S3 module with ESP32S3`r`n>>> " } else { '' }
     function Initialize-Esptool {}
-    function Select-Port { 'COM5' }
+    function Get-SerialPorts { $Ports }
     function Read-Banner { $banner }
-    function Get-Chip { [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB' } }
+    function Get-Chip([string]$Port, [switch]$Next) {
+        if ($Port -eq $Answering) { return [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB' } }
+        if (-not $Next) { throw "no chip on $Port" }
+    }
     function Select-Item([string[]]$Items, $Title, $Hints, [int]$Default) {
         if ($Items.Count -eq 1) { return 0 }
         $menus.Add($Items[$Default])
@@ -181,6 +190,30 @@ Test 'an up to date or newer board is left alone until asked' {
     }
     $run = Invoke-MainOn '1.26.1' @('flash 1.26.1')
     Assert-Equal 1 $run.Flashed.Count 'flash on request'
+}
+
+Test 'ports are tried download mode first, then bridges, jtag, unknown adapters' {
+    function Get-SerialPorts {
+        New-Port 'COM3' 0x2341 0x0043
+        New-Port 'COM7' 0x303A 0x1001
+        New-Port 'COM12' 0x1A86 0x7523
+        New-Port 'COM5' 0x10C4 0xEA60
+        New-Port 'COM9' 0x303A 0x4001
+    }
+    $found = Find-Ports
+    Assert-Equal 'COM5 COM12 COM7 COM3' (($found.Ports | ForEach-Object { $_.Device }) -join ' ') 'order'
+    Assert-Equal 'COM9 skipped: firmware USB CDC, REPL only' ($found.Skipped -join ';') 'skipped'
+    function Get-SerialPorts { New-Port 'COM5' 0x10C4 0xEA60; New-Port 'COM4' 0x303A 0x0009 }
+    Assert-Equal 'COM4' (Find-Ports).Ports[0].Device 'download mode first'
+}
+
+Test 'the next port is flashed when the first one has no chip behind it' {
+    $path = Store $BaseBuild
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
+    $ports = @((New-Port 'COM5' 0x10C4 0xEA60), (New-Port 'COM7' 0x303A 0x1001))
+    $run = Invoke-MainOn '' -Ports $ports -Answering 'COM7'
+    Assert-Equal "COM7 ESP32-S3 $path False" ($run.Flashed[0] -join ' ') 'flash arguments'
+    Assert-Throws { Invoke-MainOn '' -Ports $ports -Answering 'COM1' } 'no chip on COM7'
 }
 
 Test 'esptool progress lines are parsed' {

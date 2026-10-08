@@ -47,7 +47,12 @@ wipes the whole chip, including the filesystem, and asks again first.
 esptool works, a progress bar replaces its output; if it fails, the tail of
 that output is shown with the error.
 
-With more than one board plugged in, the same kind of list asks which one.
+The port is never asked for. With several flashable ports, for example a board
+plugged in through both its UART and its native USB connector, they are tried
+in order: a board held in download mode, then USB-UART bridges, then
+USB-Serial/JTAG, then adapters it does not recognise. A port where no ESP32
+answers is reported and the next one is tried. With two separate boards
+plugged in, unplug the one that should be left alone.
 
 ## How the variant is chosen
 
