@@ -995,28 +995,25 @@ function Get-Builds([string]$Board) {
     $builds
 }
 
-# MicroPython names variants after the hardware they need, whatever the chip: the package
-# (ESP32-D2WD gets D2WD), UNICORE for a single core, FLASH_<size> for a smaller flash, SPIRAM for
-# PSRAM, SPIRAM_OCT for octal PSRAM; the base build covers the rest. a variant the site no
-# longer builds for the latest release is left out, its job taken over by the base; cached
-# builds all count, since an older one there is simply what was downloaded
-function Get-VariantGuess($Builds, $Chip, [string]$Banner = '') {
+# the hardware esptool reports, in the names MicroPython gives its variants: the package from
+# the chip type (D2WD), FLASH_<size>, UNICORE for a single core, SPIRAM for PSRAM, SPIRAM_OCT
+# for 8MB and up, which is octal in the R8 and R16 parts
+function Get-HardwareNames($Chip) {
+    @($Chip.Type -split '[-\s()]+') + @('FLASH_' + ($Chip.FlashSize -replace 'B$', '')) +
+        @(if ($Chip.Features -match '\bSingle Core\b') { 'UNICORE' }) +
+        @(if ($Chip.Psram) { 'SPIRAM' }) + @(if ($Chip.PsramMb -ge 8) { 'SPIRAM_OCT' })
+}
+
+# the build for this hardware, decided by the hardware alone: the variant it names, the longest
+# name when it names several, the base build when it names none. variants the site no longer
+# builds for its latest release are out; cached builds all count, being what was downloaded
+function Get-VariantGuess($Builds, $Chip) {
     $latest = ($Builds.Values | Sort-Object Key | Select-Object -Last 1).Version
-    $current = @($Builds.Keys | Where-Object { $_ -and (-not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest) })
-    # "ESP32-D2WD (revision v1.0)" names its package; the base build would not fit its flash
-    $package = @($Chip.Type -split '[-\s()]+' | Where-Object { $current -contains $_ })
-    if ($package) { return $package[0] }
-    # a dual-core build does not start on a single core
-    if ($Chip.Features -match '\bSingle Core\b' -and $current -contains 'UNICORE') { return 'UNICORE' }
-    # esptool says 512KB or 4MB, MicroPython FLASH_512K or FLASH_4M
-    $flash = 'FLASH_' + ($Chip.FlashSize -replace 'B$', '')
-    if ($current -contains $flash) { return $flash }
-    # embedded PSRAM of 8MB and up is octal, as in the R8 and R16 modules
-    $psram = $Chip.Psram -or $Chip.PsramMb -or $Banner.Contains('SPIRAM')
-    $octal = $Banner.Contains('Octal-SPIRAM') -or $Chip.PsramMb -ge 8
-    if ($octal -and $current -contains 'SPIRAM_OCT') { return 'SPIRAM_OCT' }
-    if ($psram -and $current -contains 'SPIRAM') { return 'SPIRAM' }
-    ''
+    $names = Get-HardwareNames $Chip
+    $fits = @($Builds.Keys | Where-Object {
+            $_ -and $names -contains $_ -and (-not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest)
+        } | Sort-Object Length -Descending)
+    if ($fits) { $fits[0] } else { '' }
 }
 
 function Select-Variant($Builds, [string]$Current = '', [string]$Guess = '') {
@@ -1170,8 +1167,7 @@ function Find-Boards([object[]]$Ports, [string[]]$Skipped = @(), [switch]$Option
         if ($i -eq 0 -and $Skipped) { Write-Note ($Skipped -join "`n") }
 
         Write-Step wait 'repl' 'listening' -Live
-        $banner = Read-Banner $port
-        $current = Get-BannerInfo $banner
+        $current = Get-BannerInfo (Read-Banner $port)
         if ($current) {
             Write-Step ok 'repl' "MicroPython $($current.Version)" -Detail $current.Machine
         } else {
@@ -1189,7 +1185,6 @@ function Find-Boards([object[]]$Ports, [string[]]$Skipped = @(), [switch]$Option
         $boards += [pscustomobject]@{
             Port    = $port
             Chip    = $chip
-            Banner  = $banner
             Version = $(if ($current) { $current.Version } else { '' })
         }
     }
@@ -1208,7 +1203,7 @@ function Update-Board($Target, $Catalog) {
         $Catalog[$board] = Get-Builds $board
     }
     $builds = $Catalog[$board]
-    $guess = Get-VariantGuess $builds $chip $Target.Banner
+    $guess = Get-VariantGuess $builds $chip
     Write-Log ("$port $($chip.Type): $($chip.Features); flash $($chip.FlashSize), PSRAM $($chip.Psram) " +
         "$($chip.PsramMb)MB, MAC $($chip.Mac), running '$($Target.Version)', variant guess '$guess'")
     $variant = $guess
