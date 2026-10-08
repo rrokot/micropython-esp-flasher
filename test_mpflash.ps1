@@ -4,6 +4,7 @@ $Board = 'ESP32_GENERIC_S3'
 $BaseBuild = 'ESP32_GENERIC_S3-20250911-v1.26.1.bin'
 $Octal = 'ESP32_GENERIC_S3-SPIRAM_OCT-20250911-v1.26.1.bin'
 $Failed = 0
+$Interactive = $false
 
 function Assert-Equal($Expected, $Actual, [string]$What) {
     if ("$Expected" -cne "$Actual") { throw "${What}: expected '$Expected', got '$Actual'" }
@@ -27,7 +28,7 @@ function Test([string]$Name, [scriptblock]$Body) {
     $Cache = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
     New-Item -ItemType Directory -Path $Cache | Out-Null
     $said = New-Object System.Collections.Generic.List[string]
-    function Say([string]$Text = '') { $said.Add($Text) }
+    function Write-Ui([string]$Text = '', $Color, [switch]$NoNewline) { $said.Add($Text) }
     try {
         & $Body
         Write-Host "ok    $Name"
@@ -136,8 +137,7 @@ Test 'offline main can flash when only octal variant is cached' {
     function Get-PortLabel { 'test adapter' }
     function Read-Banner { '' }
     function Get-Chip { [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB' } }
-    function Read-Choice { '' }
-    function Read-Line { '1' }
+    function Read-Action { '' }
     function Get-PortSnapshot { 'COM5' }
     function Wait-Board { 'COM5' }
     function Start-Sleep {}
@@ -147,6 +147,49 @@ Test 'offline main can flash when only octal variant is cached' {
     Main
     Assert-Equal 1 $flashed.Count 'flash calls'
     Assert-Equal "COM5 ESP32-S3 $path False" ($flashed[0] -join ' ') 'flash arguments'
+}
+
+Test 'esptool progress lines are parsed' {
+    $line = 'Writing at 0x0003c000 [=========>                    ]  33.4% 512.0kB/1.5MB [1s] '
+    Assert-Equal 0.334 (Get-EsptoolPercent $line) 'percent'
+    Assert-Equal -1 (Get-EsptoolPercent 'Wrote 1601536 bytes (1048576 compressed) at 0x00000000 in 11.3 seconds') 'summary'
+    Assert-Equal 'writing' (Get-EsptoolPhase $line 'connecting') 'write phase'
+    Assert-Equal 'erasing the whole chip' (Get-EsptoolPhase 'Erasing flash memory (this may take a while)...' '') 'erase phase'
+    Assert-Equal 'connecting' (Get-EsptoolPhase 'Serial port COM5:' 'connecting') 'kept phase'
+    $summary = Format-Written 'Wrote 1601536 bytes (1048576 compressed) at 0x00000000 in 11.3 seconds (1131.5 kbit/s).'
+    if ($summary -notmatch '^1\.5 MB in 11\.3 s') { throw "summary: $summary" }
+}
+
+Test 'repl banner is split into version and board' {
+    $info = Get-BannerInfo "x`r`nMicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3`r`n>>> "
+    Assert-Equal '1.29.0' $info.Version 'version'
+    Assert-Equal 'Generic ESP32S3 module with Octal-SPIRAM' $info.Machine 'machine'
+    $info = Get-BannerInfo 'MicroPython v1.22.0-preview.5.g1234 on 2023-10-01; ESP32 module with ESP32'
+    Assert-Equal '1.22.0-preview.5.g1234' $info.Version 'preview version'
+    Assert-Equal 'ESP32 module' $info.Machine 'short machine'
+    if (Get-BannerInfo 'esp32s3' ) { throw 'not a banner' }
+}
+Test 'progress bar fills in proportion' {
+    $parts = Get-BarParts 0.5 0 20
+    Assert-Equal 10 $parts[0].Length 'half filled'
+    Assert-Equal 10 $parts[2].Length 'half empty'
+    Assert-Equal 20 (Get-BarParts 1.7 0 20)[0].Length 'clamped'
+    $sweep = Get-BarParts -1 3 20
+    Assert-Equal 20 ($sweep[0].Length + $sweep[2].Length + $sweep[4].Length) 'sweep width'
+}
+
+Test 'version change is classified' {
+    Assert-Equal 'install' (Get-VersionChange '' '1.29.0')[0] 'unknown'
+    Assert-Equal 'update' (Get-VersionChange '1.28.0' '1.29.0')[0] 'older'
+    Assert-Equal 'update' (Get-VersionChange '1.29.0-preview.12.gabc' '1.29.0')[0] 'preview'
+    Assert-Equal 'reinstall' (Get-VersionChange '1.29.0' '1.29.0')[0] 'same'
+    Assert-Equal 'downgrade' (Get-VersionChange '1.30.1' '1.29.0')[0] 'newer'
+}
+
+Test 'process arguments survive quoting' {
+    Assert-Equal 'write-flash' (ConvertTo-ProcessArg 'write-flash') 'plain'
+    Assert-Equal '"C:\My Files\fw.bin"' (ConvertTo-ProcessArg 'C:\My Files\fw.bin') 'spaces'
+    Assert-Equal '""' (ConvertTo-ProcessArg '') 'empty'
 }
 
 

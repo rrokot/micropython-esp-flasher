@@ -49,71 +49,373 @@ $KnownVendors = @{
     0x1A86 = 'WCH bridge'
 }
 
-
-function Say([string]$Text = '') {
-    Write-Host $Text
+# the file stays ASCII so Windows PowerShell 5.1 reads it without a BOM;
+# every glyph is in WGL4, so Consolas renders it as well as Cascadia
+$G = @{
+    Dot     = [string][char]0x25CF
+    Ring    = [string][char]0x25CB
+    Pointer = [string][char]0x25BA
+    Arrow   = [string][char]0x2192
+    Up      = [string][char]0x2191
+    Down    = [string][char]0x2193
+    Mid     = [string][char]0x00B7
+    Full    = [string][char]0x2588
+    Light   = [string][char]0x2591
+    H       = [string][char]0x2500
+    V       = [string][char]0x2502
+    TL      = [string][char]0x250C
+    TR      = [string][char]0x2510
+    BL      = [string][char]0x2514
+    BR      = [string][char]0x2518
 }
 
-function Fail([string]$Message) {
+$States = @{
+    ok   = $G.Dot, 'Green'
+    wait = $G.Ring, 'DarkGray'
+    warn = $G.Dot, 'Yellow'
+    fail = $G.Dot, 'Red'
+    skip = $G.Ring, 'DarkGray'
+}
+
+$Interactive = -not [Console]::IsOutputRedirected
+$Inv = [System.Globalization.CultureInfo]::InvariantCulture
+$LiveOpen = $false
+
+
+# ---------------------------------------------------------------- terminal ui
+
+function Write-Ui([string]$Text = '', [ConsoleColor]$Color = 'Gray', [switch]$NoNewline) {
+    Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline
+}
+
+function Get-Width {
+    try { [math]::Min([Console]::WindowWidth - 1, 100) } catch { 79 }
+}
+
+function Get-Row {
+    if ($Interactive) { [Console]::CursorTop } else { 0 }
+}
+
+# parts alternate text and color; a live line is redrawn in place until a normal one replaces it
+function Write-Line([object[]]$Parts = @(), [switch]$Live) {
+    if ($Live -and -not $Interactive) { return }
+    $width = Get-Width
+    $used = 0
+    if ($Interactive) { Write-Ui "`r" -NoNewline }
+    for ($i = 0; $i -lt $Parts.Count; $i += 2) {
+        $text = [string]$Parts[$i]
+        if ($used + $text.Length -gt $width) { $text = $text.Substring(0, [math]::Max(0, $width - $used)) }
+        if ($text) { Write-Ui $text $Parts[$i + 1] -NoNewline }
+        $used += $text.Length
+    }
+    if ($Interactive) { Write-Ui (' ' * ($width - $used)) -NoNewline }
+    $script:LiveOpen = [bool]$Live
+    if (-not $Live) { Write-Ui }
+}
+
+function Close-Live {
+    if ($LiveOpen) {
+        Write-Ui
+        $script:LiveOpen = $false
+    }
+}
+
+function Clear-Live {
+    if ($LiveOpen) {
+        Write-Ui ("`r" + ' ' * (Get-Width) + "`r") -NoNewline
+        $script:LiveOpen = $false
+    }
+}
+
+function Clear-Since([int]$Top) {
+    if (-not $Interactive) { return }
+    $bottom = [Console]::CursorTop
+    $blank = ' ' * ([Console]::BufferWidth - 1)
+    for ($row = $Top; $row -le $bottom; $row++) {
+        [Console]::SetCursorPosition(0, $row)
+        [Console]::Write($blank)
+    }
+    [Console]::SetCursorPosition(0, $Top)
+}
+
+function Write-Step([string]$State, [string]$Label, [string]$Value, [ConsoleColor]$Color = 'White', [string]$Detail = '', [switch]$Live) {
+    $glyph, $glyphColor = $States[$State]
+    $parts = @('  ', 'Gray', "$glyph ", $glyphColor, $Label.PadRight(10), 'DarkGray', $Value, $Color)
+    if ($Detail) { $parts += @("   $Detail", 'DarkGray') }
+    Write-Line $parts -Live:$Live
+}
+
+function Write-Note([string]$Text) {
+    foreach ($line in $Text -split "`n") {
+        Write-Line @('              ', 'Gray', $line, 'DarkGray')
+    }
+}
+
+function Get-BarParts([double]$Fraction, [int]$Frame, [int]$Width = 26) {
+    if ($Fraction -lt 0) {
+        # nothing to measure yet: a block sweeping back and forth
+        $span = 6
+        $range = $Width - $span
+        $pos = $Frame % (2 * $range)
+        if ($pos -gt $range) { $pos = 2 * $range - $pos }
+        return @(($G.Light * $pos), 'DarkGray', ($G.Full * $span), 'Cyan', ($G.Light * ($range - $pos)), 'DarkGray')
+    }
+    $filled = [int][math]::Round([math]::Min(1.0, $Fraction) * $Width)
+    @(($G.Full * $filled), 'Cyan', ($G.Light * ($Width - $filled)), 'DarkGray')
+}
+
+function Write-Activity([string]$Label, [string]$Text, [int]$Frame, [double]$Fraction = -1, [switch]$Bar) {
+    $spinner = '-\|/'[$Frame % 4]
+    $parts = @('  ', 'Gray', "$spinner ", 'Cyan', $Label.PadRight(10), 'DarkGray')
+    if ($Bar) {
+        $parts += Get-BarParts $Fraction $Frame
+        $parts += @('  ', 'Gray')
+        if ($Fraction -ge 0) { $parts += @(([string]::Format($Inv, '{0,3:0}%  ', $Fraction * 100)), 'White') }
+    }
+    $parts += @($Text, 'DarkGray')
+    Write-Line $parts -Live
+}
+
+function Write-Title {
+    Write-Ui
+    Write-Line @('  ', 'Gray', 'mpflash', 'Cyan', '   MicroPython for ESP32', 'DarkGray')
+    Write-Line @('  ', 'Gray', ($G.H * [math]::Min((Get-Width) - 2, 60)), 'DarkGray')
+    Write-Ui
+}
+
+function Write-Card([string]$Title, [object[]]$Rows) {
+    $inner = [math]::Min((Get-Width) - 6, 58)
+    Write-Line @('  ', 'Gray', "$($G.TL)$($G.H) ", 'DarkGray', $Title, 'Cyan',
+        (' ' + $G.H * [math]::Max(0, $inner - 1 - $Title.Length) + $G.TR), 'DarkGray')
+    foreach ($row in $Rows) {
+        $length = 0
+        for ($i = 0; $i -lt $row.Count; $i += 2) { $length += ([string]$row[$i]).Length }
+        Write-Line (@('  ', 'Gray', "$($G.V)  ", 'DarkGray') + $row +
+            @((' ' * [math]::Max(0, $inner - $length)), 'Gray', $G.V, 'DarkGray'))
+    }
+    Write-Line @('  ', 'Gray', "$($G.BL)$($G.H * ($inner + 2))$($G.BR)", 'DarkGray')
+}
+
+function Write-Keys([object[]]$Keys) {
+    # pairs of key and what it does
+    $parts = @('  ', 'Gray')
+    for ($i = 0; $i -lt $Keys.Count; $i += 2) {
+        $parts += @($Keys[$i], 'Cyan', " $($Keys[$i + 1])   ", 'DarkGray')
+    }
+    Write-Line $parts
+}
+
+function Write-Failure($ErrorRecord) {
+    Close-Live
+    Write-Ui
+    $exception = $ErrorRecord.Exception
+    if ($exception.Data['mpflash']) {
+        $lines = @($exception.Message -split "`n")
+        Write-Ui "  $($G.Dot) $($lines[0])" Red
+        foreach ($line in $lines[1..($lines.Count)]) {
+            if ($line) { Write-Ui "    $line" Gray }
+        }
+        $details = [string]$exception.Data['details']
+        if ($details) {
+            Write-Ui
+            $tail = @($details -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 12)
+            foreach ($line in $tail) { Write-Ui "    $($line.TrimEnd())" DarkGray }
+        }
+    } else {
+        Write-Line @('  ', 'Gray', "$($G.Dot) ", 'Red', 'unexpected error', 'Red')
+        foreach ($line in (($ErrorRecord | Out-String) + $ErrorRecord.ScriptStackTrace) -split "`n") {
+            Write-Ui "    $($line.TrimEnd())" DarkGray
+        }
+    }
+}
+
+function Fail([string]$Message, [string]$Details = '') {
     $e = New-Object System.Exception $Message
     $e.Data['mpflash'] = $true
+    $e.Data['details'] = $Details
     throw $e
 }
 
+function Read-Key {
+    [Console]::ReadKey($true)
+}
+
 function Read-Line([string]$Prompt) {
-    Write-Host $Prompt -NoNewline
+    Write-Ui $Prompt -NoNewline
     $line = [Console]::ReadLine()
     if ($null -eq $line) { Fail 'input closed' }
     $line.Trim()
 }
 
-function Read-Choice([string]$Prompt, [string[]]$Options) {
+# keys are matched by position, so e/v/u/q work on any keyboard layout
+function Read-Action([string[]]$Keys) {
     while ($true) {
-        $answer = (Read-Line $Prompt).ToLower()
-        if ($Options -contains $answer) { return $answer }
+        $key = Read-Key
+        if ($key.Key -eq 'Enter') { return '' }
+        if ($key.Key -eq 'Escape') { return 'q' }
+        $name = "$($key.Key)".ToLower()
+        if ($Keys -contains $name) { return $name }
     }
 }
 
-function Select-Item([string[]]$Items, [string]$Label) {
-    if (-not $Items) { Fail "no $Label found" }
+function Select-Item([string[]]$Items, [string]$Title, [string[]]$Hints = @(), [int]$Default = 0) {
+    if (-not $Items) { Fail 'nothing to choose from' }
     if ($Items.Count -eq 1) { return $Items[0] }
-    for ($i = 0; $i -lt $Items.Count; $i++) {
-        Say "  $($i + 1). $($Items[$i])"
-    }
-    while ($true) {
-        $raw = Read-Line "$Label [1-$($Items.Count)]: "
-        if ($raw -match '^\d+$' -and [int]$raw -ge 1 -and [int]$raw -le $Items.Count) {
-            return $Items[[int]$raw - 1]
+    $cleared = $LiveOpen
+    Clear-Live
+
+    if (-not $Interactive) {
+        Write-Ui "  $Title"
+        for ($i = 0; $i -lt $Items.Count; $i++) { Write-Ui "    $($i + 1). $($Items[$i])  $($Hints[$i])" }
+        while ($true) {
+            $raw = Read-Line "  [1-$($Items.Count)]: "
+            if ($raw -match '^\d+$' -and [int]$raw -ge 1 -and [int]$raw -le $Items.Count) { return $Items[[int]$raw - 1] }
         }
     }
+
+    $width = ($Items | Measure-Object -Property Length -Maximum).Maximum
+    # a cleared status line already leaves the gap above the menu
+    $start = Get-Row
+    if (-not $cleared) { Write-Ui }
+    Write-Line @('  ', 'Gray', $Title, 'White', '     ', 'Gray', "$($G.Up)$($G.Down)", 'Cyan', ' move   ', 'DarkGray',
+        'enter', 'Cyan', ' choose   ', 'DarkGray', 'esc', 'Cyan', ' quit', 'DarkGray')
+    $selected = [math]::Max(0, [math]::Min($Default, $Items.Count - 1))
+    $top = -1
+    while ($true) {
+        if ($top -ge 0) { [Console]::SetCursorPosition(0, $top) }
+        for ($i = 0; $i -lt $Items.Count; $i++) {
+            $hint = if ($i -lt $Hints.Count) { $Hints[$i] } else { '' }
+            if ($i -eq $selected) {
+                Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "$($i + 1)  ", 'DarkGray', $Items[$i].PadRight($width), 'White', "   $hint", 'Gray')
+            } else {
+                Write-Line @('    ', 'Gray', "$($i + 1)  ", 'DarkGray', $Items[$i].PadRight($width), 'Gray', "   $hint", 'DarkGray')
+            }
+        }
+        if ($top -lt 0) { $top = [Console]::CursorTop - $Items.Count }
+        $key = Read-Key
+        if ($key.Key -eq 'UpArrow') { $selected = ($selected + $Items.Count - 1) % $Items.Count; continue }
+        if ($key.Key -eq 'DownArrow') { $selected = ($selected + 1) % $Items.Count; continue }
+        if ($key.Key -eq 'Escape') { Clear-Since $start; Fail 'cancelled' }
+        if ($key.Key -eq 'Enter') { break }
+        if ("$($key.Key)" -match '^(?:D|NumPad)([1-9])$' -and [int]$Matches[1] -le $Items.Count) {
+            $selected = [int]$Matches[1] - 1
+            break
+        }
+    }
+    Clear-Since $start
+    $Items[$selected]
 }
 
-function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [switch]$Live) {
+function Format-Size([double]$Bytes) {
+    if ($Bytes -ge 1MB) { return [string]::Format($Inv, '{0:0.0} MB', $Bytes / 1MB) }
+    [string]::Format($Inv, '{0:0} kB', $Bytes / 1KB)
+}
+
+
+# ------------------------------------------------------------------- esptool
+
+function ConvertTo-ProcessArg([string]$Arg) {
+    if ($Arg -and $Arg -notmatch '[\s"]') { return $Arg }
+    '"' + (($Arg -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Get-EsptoolPhase([string]$Line, [string]$Phase) {
+    if ($Line -match '^Connecting') { return 'connecting' }
+    if ($Line -match '^Erasing flash memory \(') { return 'erasing the whole chip' }
+    if ($Line -match '^Erasing') { return 'erasing' }
+    if ($Line -match '^(Compressed|Writing at)') { return 'writing' }
+    if ($Line -match '^Hash of data verified') { return 'verified' }
+    if ($Line -match '^Hard resetting') { return 'resetting' }
+    $Phase
+}
+
+function Get-EsptoolPercent([string]$Line) {
+    $m = [regex]::Match($Line, '^Writing at .*?(\d+(?:\.\d+)?)\s?%')
+    if ($m.Success) { [double]$m.Groups[1].Value / 100 } else { -1 }
+}
+
+# runs esptool.exe and, with a label, animates a status line while it works
+function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [string]$Label = '', [string]$Phase = 'connecting', [switch]$Bar) {
     $cmd = @('--port', $Port)
     if ($Baud) { $cmd += @('--baud', "$Baud") }
     $cmd += $Arguments
-    # esptool reports progress on stderr; keep it as text instead of error records
-    $ErrorActionPreference = 'Continue'
-    $lines = & $Esptool @cmd 2>&1 | ForEach-Object {
-        # an empty stderr line stringifies as the exception type name in 5.1
-        $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
-        if ($Live) { Say $line }
-        $line
+
+    $info = New-Object System.Diagnostics.ProcessStartInfo $Esptool
+    $info.Arguments = ($cmd | ForEach-Object { ConvertTo-ProcessArg $_ }) -join ' '
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $readers = $process.StandardOutput, $process.StandardError
+        $pending = @($readers[0].ReadLineAsync(), $readers[1].ReadLineAsync())
+        $fraction = -1
+        $frame = 0
+        while ($pending[0] -or $pending[1]) {
+            for ($i = 0; $i -lt 2; $i++) {
+                while ($pending[$i] -and $pending[$i].IsCompleted) {
+                    $line = $pending[$i].Result
+                    if ($null -eq $line) { $pending[$i] = $null; break }
+                    $lines.Add($line)
+                    $Phase = Get-EsptoolPhase $line $Phase
+                    $percent = Get-EsptoolPercent $line
+                    if ($percent -ge 0) { $fraction = $percent }
+                    $pending[$i] = $readers[$i].ReadLineAsync()
+                }
+            }
+            if ($Label) {
+                $text = [string]::Format($Inv, '{0}   {1:0.0}s', $Phase, $watch.Elapsed.TotalSeconds)
+                Write-Activity $Label $text $frame $fraction -Bar:$Bar
+            }
+            $frame++
+            Start-Sleep -Milliseconds 80
+        }
+        $process.WaitForExit()
+        [pscustomobject]@{
+            Code    = $process.ExitCode
+            Output  = ($lines -join "`n")
+            Seconds = $watch.Elapsed.TotalSeconds
+        }
+    } finally {
+        if (-not $process.HasExited) { $process.Kill() }
+        $process.Dispose()
     }
-    [pscustomobject]@{ Code = $LASTEXITCODE; Output = ($lines -join "`n") }
 }
 
-function Save-Url([string]$Url, [string]$Path) {
-    # returns the advertised length, or -1 when the server did not send one
+# returns the advertised length, or -1 when the server did not send one
+function Save-Url([string]$Url, [string]$Path, [string]$Label = '') {
     $request = [System.Net.HttpWebRequest]::Create($Url)
     $request.Timeout = 10000
     $request.ReadWriteTimeout = 10000
     $request.UserAgent = 'mpflash'
     $response = $request.GetResponse()
     try {
+        $total = $response.ContentLength
+        $source = $response.GetResponseStream()
         $output = [System.IO.File]::Create($Path)
-        try { $response.GetResponseStream().CopyTo($output) } finally { $output.Dispose() }
-        $response.ContentLength
+        try {
+            $buffer = New-Object byte[] 65536
+            $done = 0
+            $frame = 0
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            while (($count = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $output.Write($buffer, 0, $count)
+                $done += $count
+                if ($Label -and $watch.ElapsedMilliseconds -ge $frame * 80) {
+                    $fraction = if ($total -gt 0) { $done / $total } else { -1 }
+                    $text = if ($total -gt 0) { "$(Format-Size $done) of $(Format-Size $total)" } else { Format-Size $done }
+                    Write-Activity $Label $text $frame $fraction -Bar
+                    $frame++
+                }
+            }
+        } finally {
+            $output.Dispose()
+        }
+        $total
     } finally {
         $response.Dispose()
     }
@@ -125,7 +427,7 @@ function Get-WebText([string]$Url) {
 
 function Initialize-Esptool {
     if (Test-Path -LiteralPath $Esptool -PathType Leaf) { return }
-    Say "esptool.exe not found in $EsptoolDir, downloading the latest release"
+    Write-Step wait 'esptool' 'looking up the latest release' -Live
     New-Item -ItemType Directory -Force -Path $EsptoolDir | Out-Null
     $zip = Join-Path $EsptoolDir 'esptool.zip.part'
     $partial = "$Esptool.part"
@@ -133,11 +435,11 @@ function Initialize-Esptool {
         $release = Invoke-RestMethod -Uri $EsptoolRelease -UseBasicParsing -TimeoutSec 10
         $asset = $release.assets | Where-Object { $_.name -like '*-windows-amd64.zip' } | Select-Object -First 1
         if (-not $asset) { throw "no Windows build in esptool $($release.tag_name)" }
-        Say "downloading $($asset.name) ($([math]::Round($asset.size / 1MB)) MB)"
-        $expected = Save-Url $asset.browser_download_url $zip
+        $expected = Save-Url $asset.browser_download_url $zip 'esptool'
         if ($expected -ge 0 -and (Get-Item -LiteralPath $zip).Length -ne $expected) {
             throw 'incomplete esptool download'
         }
+        Write-Step wait 'esptool' 'unpacking' -Live
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
         try {
@@ -152,8 +454,9 @@ function Initialize-Esptool {
             $archive.Dispose()
         }
         Move-Item -LiteralPath $partial -Destination $Esptool -Force
-        Say "esptool $($release.tag_name) installed"
+        Write-Step ok 'esptool' $release.tag_name -Detail 'downloaded once, kept next to the script'
     } catch {
+        Write-Step fail 'esptool' 'not available'
         Fail ("cannot download esptool: $($_.Exception.Message)`n" +
             "connect to the internet and run again, or put esptool.exe from`n" +
             "https://github.com/espressif/esptool/releases into $EsptoolDir")
@@ -161,6 +464,9 @@ function Initialize-Esptool {
         Remove-Item -LiteralPath $zip, $partial -Force -ErrorAction SilentlyContinue
     }
 }
+
+
+# --------------------------------------------------------------------- board
 
 function ConvertTo-ChipArg([string]$Chip) {
     $Chip.ToLower().Replace('-', '')
@@ -201,36 +507,42 @@ function Get-PortClass($Port) {
     'unknown adapter', $true
 }
 
+function Format-PortIds($Port) {
+    '{0:x4}:{1:x4}' -f $Port.VendorId, $Port.ProductId
+}
+
 function Select-Port {
+    Write-Step wait 'port' 'looking for boards' -Live
     $ports = @(Get-SerialPorts)
-    if (-not $ports) { Fail 'no board detected, plug one in' }
+    if (-not $ports) {
+        Write-Step fail 'port' 'nothing plugged in'
+        Fail 'no board detected, plug one in'
+    }
 
     $usable = @()
+    $hints = @()
+    $skipped = @()
     foreach ($p in $ports) {
         $label, $flashable = Get-PortClass $p
         if ($flashable) {
-            $usable += "$($p.Device)  $label"
+            $usable += $p.Device
+            $hints += "$label  $(Format-PortIds $p)"
         } else {
-            Say "skipping $($p.Device) ($label)"
+            $skipped += "$($p.Device) skipped: $label"
         }
     }
 
     if (-not $usable) {
+        Write-Step fail 'port' 'no flashable port'
+        Write-Note ($skipped -join "`n")
         Fail ("no port that can be flashed`n" +
             "this board exposes only its firmware serial port`n" +
             'hold BOOT, tap RESET, release BOOT and run again')
     }
-    if ($usable.Count -gt 1) { Say 'several boards connected:' }
-    (Select-Item $usable 'port').Split(' ')[0]
-}
-
-function Get-PortLabel([string]$Device) {
-    foreach ($p in Get-SerialPorts) {
-        if ($p.Device -eq $Device) {
-            return '{0} [{1:x4}:{2:x4}]' -f (Get-PortClass $p)[0], $p.VendorId, $p.ProductId
-        }
-    }
-    '?'
+    $port = Select-Item $usable 'which board?' $hints
+    Write-Step ok 'port' $port -Detail $hints[[array]::IndexOf($usable, $port)]
+    if ($skipped) { Write-Note ($skipped -join "`n") }
+    $port
 }
 
 function Get-PortSnapshot {
@@ -287,26 +599,30 @@ function Read-Banner([string]$Port) {
 function Get-Chip([string]$Port) {
     $m = $null
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        $out = (Invoke-Esptool $Port 'flash-id').Output
+        $phase = if ($attempt) { 'no answer, retrying' } else { 'connecting' }
+        $out = (Invoke-Esptool $Port 'flash-id' -Label 'chip' -Phase $phase).Output
         $m = [regex]::Match($out, 'Chip (?:is|type:)\s*(ESP32\S*)')
         if ($m.Success) { break }
-        if ($attempt -eq 0) {
-            Say 'no answer, retrying'
-            Start-Sleep -Milliseconds 1500
-        }
+        if ($attempt -eq 0) { Start-Sleep -Milliseconds 1500 }
     }
     if (-not $m.Success) {
-        Say $out
-        Fail 'could not identify the chip, see esptool output above'
+        Write-Step fail 'chip' 'no answer from the bootloader'
+        Fail 'could not identify the chip, esptool said:' $out
     }
     $psram = [regex]::Match($out, 'Embedded PSRAM (\d+)MB')
     $flash = [regex]::Match($out, 'Detected flash size:\s*(\S+)')
-    [pscustomobject]@{
+    $chip = [pscustomobject]@{
         Name      = ConvertTo-ChipName $m.Groups[1].Value
         PsramMb   = $(if ($psram.Success) { [int]$psram.Groups[1].Value } else { 0 })
         FlashSize = $(if ($flash.Success) { $flash.Groups[1].Value } else { '?' })
     }
+    $psramText = if ($chip.PsramMb) { "$($chip.PsramMb)MB PSRAM" } else { 'no PSRAM' }
+    Write-Step ok 'chip' $chip.Name -Detail "$($chip.FlashSize) flash $($G.Mid) $psramText"
+    $chip
 }
+
+
+# ------------------------------------------------------------------ firmware
 
 # variants are keyed by name, '' is the base build
 function ConvertTo-Builds([string]$Board, [string[]]$Names) {
@@ -344,26 +660,30 @@ function Get-Builds([string]$Board, [switch]$CheckOnline) {
     if (-not $CheckOnline) {
         $builds = Get-CachedBuilds $Board
         if ($builds.Count) {
-            Say "using local firmware from $Cache"
-            Say 'press u at the prompt to check for online updates'
+            Write-Step ok 'firmware' 'local copy' -Detail 'u checks micropython.org for a newer one'
             return $builds
         }
     }
+    Write-Step wait 'firmware' 'asking micropython.org' -Live
     try {
         $html = Get-WebText "$Base/download/$Board/"
     } catch {
         $builds = Get-CachedBuilds $Board
         if (-not $builds.Count) {
+            Write-Step fail 'firmware' 'offline, nothing cached'
             Fail ("cannot reach micropython.org and no cached firmware for $Board`n" +
                 "connect to the internet and flash once, or copy a stable $Board .bin to $Cache")
         }
-        Say "offline: using cached firmware from $Cache"
-        Say 'the latest online release cannot be checked'
+        Write-Step warn 'firmware' 'offline: using cached firmware' -Detail 'newer releases not checked'
         return $builds
     }
     $names = @([regex]::Matches($html, '/resources/firmware/[^"]+\.bin') | ForEach-Object { $_.Value.Split('/')[-1] })
     $builds = ConvertTo-Builds $Board $names
-    if (-not $builds.Count) { Fail "no firmware published for $Board" }
+    if (-not $builds.Count) {
+        Write-Step fail 'firmware' 'nothing published'
+        Fail "no firmware published for $Board"
+    }
+    Write-Step ok 'firmware' 'micropython.org' -Detail 'latest stable releases'
     $builds
 }
 
@@ -379,10 +699,17 @@ function Get-VariantGuess([string]$Chip, [string]$Banner, [int]$PsramMb, $Builds
     ''
 }
 
-function Select-Variant($Builds) {
-    $names = @($Builds.Keys | Sort-Object | ForEach-Object { if ($_) { $_ } else { '(base)' } })
-    $chosen = Select-Item $names 'variant'
-    if ($chosen -eq '(base)') { '' } else { $chosen }
+function Select-Variant($Builds, [string]$Current = '', [string]$Guess = '') {
+    $keys = @($Builds.Keys | Sort-Object)
+    $names = @($keys | ForEach-Object { if ($_) { $_ } else { 'base' } })
+    $hints = @($keys | ForEach-Object {
+            $hint = $Builds[$_].Version
+            if ($_ -eq $Guess) { $hint += '   matches this board' }
+            $hint
+        })
+    $default = [array]::IndexOf($keys, $Current)
+    $chosen = Select-Item $names 'which build?' $hints $default
+    $keys[[array]::IndexOf($names, $chosen)]
 }
 
 function Get-Firmware([string]$Url, [string]$Name) {
@@ -390,34 +717,85 @@ function Get-Firmware([string]$Url, [string]$Name) {
     $path = Join-Path $Cache $Name
     $existing = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
     if ($existing -and $existing.Length) { return $path }
-    Say "downloading $Name"
     $partial = "$path.part"
     try {
-        $expected = Save-Url $Url $partial
+        $expected = Save-Url $Url $partial 'download'
         $size = (Get-Item -LiteralPath $partial).Length
         if (-not $size) { throw 'empty firmware download' }
         if ($expected -ge 0 -and $size -ne $expected) { throw 'incomplete firmware download' }
         Move-Item -LiteralPath $partial -Destination $path -Force
+        Write-Step ok 'download' (Format-Size $size) -Detail "saved to $Cache"
+    } catch {
+        Write-Step fail 'download' $_.Exception.Message
+        throw
     } finally {
         Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
     }
     $path
 }
 
+# what flashing does to the version on the board, and how loudly to say it
+function Get-VersionChange([string]$Current, [string]$Target) {
+    $m = [regex]::Match($Current, '^(\d+)\.(\d+)(?:\.(\d+))?')
+    if (-not $m.Success) { return 'install', 'Cyan' }
+    $patch = if ($m.Groups[3].Success) { $m.Groups[3].Value } else { '0' }
+    $have = [version]"$($m.Groups[1].Value).$($m.Groups[2].Value).$patch"
+    $want = [version]$Target
+    if ($have -lt $want -or ($have -eq $want -and $Current -match 'preview')) { return 'update', 'Green' }
+    if ($have -eq $want) { return 'reinstall', 'DarkGray' }
+    'downgrade', 'Yellow'
+}
+
+function Write-Plan([string]$Board, [string]$Variant, $Build, [string]$Current, [string]$Chip) {
+    $change, $color = Get-VersionChange $Current $Build.Version
+    $cached = Test-Path -LiteralPath (Join-Path $Cache $Build.Name) -PathType Leaf
+    Write-Ui
+    Write-Card ($Board + $(if ($Variant) { "-$Variant" })) @(
+        , @()
+        , @($(if ($Current) { $Current } else { 'no MicroPython' }), $(if ($Current) { 'Gray' } else { 'DarkGray' }),
+            "  $($G.Arrow)  ", 'DarkGray', $Build.Version, 'White', '     ', 'Gray', $change, $color)
+        , @('offset ', 'DarkGray', (Format-Offset $Chip), 'Gray', "   $($G.Mid)   ", 'DarkGray',
+            $(if ($cached) { 'cached' } else { 'will be downloaded' }), 'Gray')
+        , @()
+    )
+    Write-Ui
+}
+
+
+# --------------------------------------------------------------------- flash
+
+function Format-Written([string]$Output) {
+    $m = [regex]::Match($Output, 'Wrote (\d+) bytes.* in ([\d.]+) seconds')
+    if (-not $m.Success) { return 'done' }
+    [string]::Format($Inv, '{0} in {1:0.0} s', (Format-Size ([double]$m.Groups[1].Value)), [double]$m.Groups[2].Value)
+}
+
+# "MicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3"
+function Get-BannerInfo([string]$Banner) {
+    $m = [regex]::Match($Banner, 'MicroPython v(\S+)(?: on [^;\r\n]*;\s*([^\r\n]*?)(?: with ESP32\S*)?)?\s*(?:\r|\n|$)')
+    if (-not $m.Success) { return $null }
+    [pscustomobject]@{ Version = $m.Groups[1].Value; Machine = $m.Groups[2].Value.Trim() }
+}
+
 function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase) {
     $chipArg = ConvertTo-ChipArg $Chip
     if ($Erase) {
-        Say 'erasing flash'
-        $r = Invoke-Esptool $Port '--chip', $chipArg, 'erase-flash' -Live
-        if ($r.Code) { Fail 'erase failed' }
+        $r = Invoke-Esptool $Port '--chip', $chipArg, 'erase-flash' -Label 'erase' -Bar
+        if ($r.Code) {
+            Write-Step fail 'erase' 'failed'
+            Fail 'erase failed, esptool said:' $r.Output
+        }
+        Write-Step ok 'erase' 'whole chip' -Detail ([string]::Format($Inv, '{0:0.0} s', $r.Seconds))
     }
     foreach ($baud in $Bauds) {
-        Say "writing at $baud baud"
-        $r = Invoke-Esptool $Port '--chip', $chipArg, 'write-flash', (Format-Offset $Chip), $Path -Baud $baud -Live
-        if ($r.Code -eq 0) { return $baud }
-        Say "$baud baud failed, dropping down"
+        $r = Invoke-Esptool $Port '--chip', $chipArg, 'write-flash', (Format-Offset $Chip), $Path -Baud $baud -Label 'write' -Bar
+        if ($r.Code -eq 0) {
+            Write-Step ok 'write' (Format-Written $r.Output) -Detail "$baud baud"
+            return $baud
+        }
+        Write-Step warn 'write' "$baud baud failed" -Detail 'trying slower'
     }
-    Fail 'flashing failed at every baud rate'
+    Fail 'flashing failed at every baud rate, esptool said:' $r.Output
 }
 
 function Main {
@@ -426,80 +804,115 @@ function Main {
     $env:TERM = 'dumb'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+    Write-Title
     Initialize-Esptool
     $port = Select-Port
-    Say "port     $port"
-    Say "adapter  $(Get-PortLabel $port)"
 
-    Say 'reading repl banner'
+    Write-Step wait 'repl' 'listening' -Live
     $banner = Read-Banner $port
+    $current = Get-BannerInfo $banner
+    $currentVersion = if ($current) { $current.Version } else { '' }
+    if ($current) {
+        Write-Step ok 'repl' "MicroPython $currentVersion" -Detail $current.Machine
+    } else {
+        Write-Step skip 'repl' 'no MicroPython answer' DarkGray
+    }
     Start-Sleep -Milliseconds 500
-    Say 'identifying chip'
+
     $chip = Get-Chip $port
     $board = $Boards[$chip.Name]
     if (-not $board) { Fail "unsupported chip: $($chip.Name)" }
 
     $builds = Get-Builds $board
-    $variant = Get-VariantGuess $chip.Name $banner $chip.PsramMb $builds
+    $guess = Get-VariantGuess $chip.Name $banner $chip.PsramMb $builds
+    $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
-        Say 'the guessed variant is unavailable; choose from available firmware:'
-        $variant = Select-Variant $builds
+        Write-Note 'the build this board needs is not available, pick one'
+        $variant = Select-Variant $builds '' $guess
     }
-    $current = [regex]::Match($banner, 'MicroPython v(\S+)')
 
     while ($true) {
+        $top = Get-Row
         $build = $builds[$variant]
-        Say "chip     $($chip.Name)"
-        Say "flash    $($chip.FlashSize)"
-        Say "psram    $(if ($chip.PsramMb) { "$($chip.PsramMb)MB" } else { 'none' })"
-        Say "board    $board$(if ($variant) { "-$variant" })"
-        Say "offset   $(Format-Offset $chip.Name)"
-        Say "current  $(if ($current.Success) { $current.Groups[1].Value } else { 'unknown' })"
-        Say "target   $($build.Version)"
-        Say
-        $answer = Read-Choice '[enter] flash   e = erase and flash   v = other variant   u = check updates   q = quit: ' '', 'e', 'v', 'u', 'q'
-        if ($answer -eq 'q') { return }
-        if ($answer -eq 'u') {
-            $builds = Get-Builds $board -CheckOnline
-            if (-not $builds.ContainsKey($variant)) { $variant = Select-Variant $builds }
-            Say
+        Write-Plan $board $variant $build $currentVersion $chip.Name
+        $keys = @('enter', 'flash', 'e', 'erase + flash')
+        if ($builds.Count -gt 1) { $keys += @('v', 'variant') }
+        $keys += @('u', 'check online', 'q', 'quit')
+        $menuTop = Get-Row
+        Write-Keys $keys
+        $answer = Read-Action @('e', 'v', 'u', 'q')
+        if ($answer -eq 'q') {
+            Clear-Since $menuTop
+            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'quit, nothing written', 'DarkGray')
+            return
+        }
+        if ($answer -eq 'e') {
+            Write-Line @('  ', 'Gray', 'erase the whole chip, files on the board included?   ', 'Yellow', 'y', 'Cyan', ' yes   ', 'DarkGray', 'n', 'Cyan', ' no', 'DarkGray')
+            if ((Read-Key).Key -eq 'Y') {
+                Clear-Since $menuTop
+                Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Yellow', 'erase + flash', 'White')
+                break
+            }
+            Clear-Since $top
             continue
         }
-        if ($answer -ne 'v') { break }
-        $variant = Select-Variant $builds
-        Say
+        if ($answer -eq 'u') {
+            Clear-Since $top
+            $builds = Get-Builds $board -CheckOnline
+            if (-not $builds.ContainsKey($variant)) { $variant = Select-Variant $builds '' $guess }
+            continue
+        }
+        if ($answer -eq 'v') {
+            Clear-Since $top
+            $variant = Select-Variant $builds $variant $guess
+            continue
+        }
+        Clear-Since $menuTop
+        Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', 'flash', 'White')
+        break
     }
+    Write-Ui
 
     $path = Get-Firmware $build.Url $build.Name
     $before = Get-PortSnapshot
     $baud = Invoke-Flash $port $chip.Name $path ($answer -eq 'e')
+    Write-Step wait 'reboot' 'waiting for the board' -Live
     Start-Sleep -Seconds 2
     $port = Wait-Board $before $port
-    Say "board is back on $port"
+    Write-Step ok 'reboot' "back on $port"
+
+    Write-Step wait 'repl' 'listening' -Live
     $after = Read-Banner $port
-    $m = [regex]::Match($after, 'MicroPython v\S+.*')
-    Say "`ndone at $baud baud"
-    Say $(if ($m.Success) { $m.Value.Trim() } elseif ($after.Trim()) { $after.Trim() } else { 'no banner, power-cycle the board' })
+    $running = Get-BannerInfo $after
+    if ($running) {
+        Write-Step ok 'repl' "MicroPython $($running.Version)" -Detail $running.Machine
+        Write-Ui
+        Write-Line @('  ', 'Gray', 'Ready.', 'Green', "   MicroPython $($build.Version) is running on $port", 'Gray')
+    } else {
+        Write-Step warn 'repl' 'no banner' -Detail 'power-cycle the board'
+        Write-Ui
+        Write-Line @('  ', 'Gray', 'Flashed', 'Green', " at $baud baud", 'Gray')
+    }
 }
 
 
 if ($MyInvocation.InvocationName -ne '.') {
     $status = 0
+    try { $Host.UI.RawUI.WindowTitle = 'mpflash' } catch {}
     try {
+        if ($Interactive) { [Console]::CursorVisible = $false }
         if ([Console]::IsInputRedirected) { Fail 'run this from a console' }
         Main
     } catch {
-        if ($_.Exception.Data['mpflash']) {
-            Say "`n$($_.Exception.Message)"
-        } else {
-            Say ($_ | Out-String)
-            Say $_.ScriptStackTrace
-        }
+        Write-Failure $_
         $status = 1
+    } finally {
+        if ($Interactive) { [Console]::CursorVisible = $true }
     }
     if (-not [Console]::IsInputRedirected) {
-        Write-Host "`npress enter to close " -NoNewline
-        [void][Console]::ReadLine()
+        Write-Ui
+        Write-Line @('  ', 'Gray', 'press any key to close', 'DarkGray')
+        [void][Console]::ReadKey($true)
     }
     exit $status
 }

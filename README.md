@@ -22,24 +22,34 @@ It finds the board, identifies the chip, works out which build belongs on it,
 prints what it is about to do and waits:
 
 ```
-port     COM5
-chip     ESP32-S3
-flash    8MB
-psram    8MB
-board    ESP32_GENERIC_S3-SPIRAM_OCT
-offset   0x0
-current  1.28.0
-target   1.29.0
+  mpflash   MicroPython for ESP32
+  ────────────────────────────────────────────────────────────
 
-[enter] flash   e = erase and flash   v = other variant   u = check updates   q = quit:
+  ● port      COM5   Silicon Labs bridge  10c4:ea60
+  ● repl      MicroPython 1.28.0   Generic ESP32S3 module with Octal-SPIRAM
+  ● chip      ESP32-S3   8MB flash · 8MB PSRAM
+  ● firmware  local copy   u checks micropython.org for a newer one
+
+  ┌─ ESP32_GENERIC_S3-SPIRAM_OCT ──────────────────────────────┐
+  │                                                            │
+  │  1.28.0  →  1.29.0     update                              │
+  │  offset 0x0   ·   cached                                   │
+  │                                                            │
+  └────────────────────────────────────────────────────────────┘
+
+  enter flash   e erase + flash   v variant   u check online   q quit
 ```
 
-`e` wipes the whole chip, including the filesystem. Plain `enter` leaves the
-filesystem partition alone, so `boot.py` and the rest of the device files
-survive. `v` lists the available variants in case the guess is wrong.
-`u` checks the website for the latest stable releases before you confirm flashing.
+Keys act on a single press, no `enter` needed, and work on any keyboard layout.
+`e` wipes the whole chip, including the filesystem, and asks for `y` first.
+Plain `enter` leaves the filesystem partition alone, so `boot.py` and the rest
+of the device files survive. `v` lists the available variants in case the guess
+is wrong. `u` checks the website for the latest stable releases before you
+confirm flashing. While esptool works, a progress bar replaces its output; if it
+fails, the tail of that output is shown with the error.
 
-With more than one board plugged in it prints a numbered list and asks which.
+With more than one board plugged in it shows a list to pick from with the arrow
+keys or the number.
 
 ## How the variant is chosen
 
