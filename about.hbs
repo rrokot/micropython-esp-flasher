@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>micropython-esp-flasher dependency licenses</title>
+<style>body{max-width:70rem;margin:2rem auto;padding:0 1rem;font:16px system-ui}pre{white-space:pre-wrap}</style>
+<h1>Third-party licenses</h1>
+{{#each licenses}}
+<h2>{{name}}</h2>
+<p>{{#each used_by}}{{crate.name}} {{crate.version}}; {{/each}}</p>
+<pre>{{text}}</pre>
+{{/each}}
+</html>

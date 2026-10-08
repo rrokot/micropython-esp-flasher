@@ -3,3 +3,6 @@
 *.bin.part
 esptool/
 logs/
+target/
+dist/
+backups/

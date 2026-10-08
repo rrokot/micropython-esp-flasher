@@ -1,6 +1,6 @@
 # micropython-esp-flasher
 
-Install or update MicroPython on ESP boards from a Windows 10 or 11 (x64) computer.
+Install or update MicroPython on ESP32 boards from a Windows 10 or 11 (x64) computer.
 
 ![MicroPython update countdown](docs/screen.svg)
 
@@ -8,7 +8,7 @@ Install or update MicroPython on ESP boards from a Windows 10 or 11 (x64) comput
 
 The tool can:
 
-- Find USB serial ports and update several ESP boards in one run.
+- Find USB serial ports and update several ESP32 boards in one run.
 - Select firmware from chip type, flash size, and PSRAM.
 - Skip boards that need no update, including boards with a newer MicroPython version.
 - Replace a recognised wrong build with the correct build of the same version.
@@ -17,10 +17,10 @@ The tool can:
 
 ## Usage
 
-1. Download the ZIP file from the [latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest).
+1. Download the ZIP file from the [Rust build](https://github.com/rrokot/micropython-esp-flasher/actions/workflows/rust.yml).
 2. Extract the ZIP file.
 3. Connect your boards to the computer.
-4. Double-click `micropython-esp-flasher.cmd`.
+4. Double-click `micropython-esp-flasher.exe`.
 
 The tool waits 5 seconds before it writes firmware or skips a board.
 Press a key or click during this time to open the menu.
@@ -39,11 +39,14 @@ For offline use:
 
 ## Development
 
-To run the tests, use this command:
+Build the program with Rust 1.95 or later:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File micropython-esp-flasher.Tests.ps1
+```text
+cargo build --release --locked
+cargo test --locked
 ```
 
-A source code copy does not include `esptool.exe`.
-The tool downloads it on the first run.
+The program uses espflash as a library. It does not need a separate esptool program.
+ESP8266 is not supported.
+
+See [development notes](docs/development.md) for command-line options and board tests.

@@ -1,0 +1,45 @@
+name: Rust build
+
+on:
+  push:
+    branches: [rust]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Check code
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked
+      - name: Build executable
+        run: cargo build --release --locked
+      - name: Build license notices
+        shell: pwsh
+        run: |
+          cargo install cargo-about --locked --features cli
+          cargo about generate --locked --all-features about.hbs --output-file target/THIRD-PARTY-LICENSES.html
+      - name: Create ZIP
+        shell: pwsh
+        run: ./scripts/package.ps1 -Executable target/x86_64-pc-windows-msvc/release/micropython-esp-flasher.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: micropython-esp-flasher-windows-x64
+          path: dist/*.zip
+          if-no-files-found: error
