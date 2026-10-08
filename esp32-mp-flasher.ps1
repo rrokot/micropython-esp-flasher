@@ -4,6 +4,7 @@ $ProgressPreference = 'SilentlyContinue'
 $Base = 'https://micropython.org'
 $EsptoolRelease = 'https://api.github.com/repos/espressif/esptool/releases/latest'
 $Bauds = 2000000, 921600, 460800, 115200
+$Countdown = 5
 $Cache = Join-Path $PSScriptRoot 'firmware'
 $EsptoolDir = Join-Path $PSScriptRoot 'esptool'
 $Esptool = Join-Path $EsptoolDir 'esptool.exe'
@@ -258,6 +259,7 @@ public static class EspFlasherInput {
     [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr handle, uint mode);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadConsoleInputW(IntPtr handle, [Out] Record[] records, uint length, out uint read);
+    [DllImport("kernel32.dll")] static extern bool GetNumberOfConsoleInputEvents(IntPtr handle, out uint count);
 
     const uint MouseInput = 0x10, QuickEdit = 0x40, ExtendedFlags = 0x80, VirtualTerminalInput = 0x200;
 
@@ -288,6 +290,20 @@ public static class EspFlasherInput {
             if (r.Flags == 0 && (r.Buttons & 1) != 0) return new int[] { 3, 0, r.X, r.Y, 0 };
             if (r.Flags == 4) return new int[] { 4, 0, r.X, r.Y, ((int)r.Buttons) >> 16 };
         }
+    }
+
+    // drains waiting input without blocking; true once a key went down or a button was clicked
+    public static bool Pressed() {
+        IntPtr input = GetStdHandle(-10);
+        Record[] records = new Record[1];
+        uint count, read;
+        while (GetNumberOfConsoleInputEvents(input, out count) && count > 0) {
+            if (!ReadConsoleInputW(input, records, 1, out read) || read == 0) return false;
+            Record r = records[0];
+            if (r.Type == 1 && r.KeyDown != 0) return true;
+            if (r.Type == 2 && r.Flags == 0 && (r.Buttons & 1) != 0) return true;
+        }
+        return false;
     }
 }
 '@
@@ -322,6 +338,34 @@ function Read-Input {
     }
     $info = [Console]::ReadKey($true)
     [pscustomobject]@{ Kind = 'key'; Key = $info.Key; X = 0; Y = 0; Delta = 0 }
+}
+
+function Test-Pressed {
+    if (Initialize-Input) { return [EspFlasherInput]::Pressed() }
+    $pressed = $false
+    while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true); $pressed = $true }
+    $pressed
+}
+
+# counts down before acting on its own; true when a key or click asked for the menu instead.
+# the countdown stays as the live line, for the menu or the action line to replace
+function Wait-Countdown([string]$Action, [int]$Seconds) {
+    if (-not $Interactive) { return $false }
+    Write-Ui
+    $mode = Enable-Mouse
+    try {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($watch.ElapsedMilliseconds -lt $Seconds * 1000) {
+            $left = $Seconds - [math]::Floor($watch.ElapsedMilliseconds / 1000)
+            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', $Action, 'White', " in $left s", 'Cyan',
+                '   any key or click for options', 'DarkGray') -Live
+            if (Test-Pressed) { return $true }
+            Start-Sleep -Milliseconds 50
+        }
+        $false
+    } finally {
+        Restore-Mouse $mode
+    }
 }
 
 # a list driven by arrows, wheel, mouse hover and click, or each row's key; returns the row index
@@ -765,14 +809,8 @@ function Get-CachedBuilds([string]$Board) {
     ConvertTo-Builds $Board $names
 }
 
-function Get-Builds([string]$Board, [switch]$CheckOnline) {
-    if (-not $CheckOnline) {
-        $builds = Get-CachedBuilds $Board
-        if ($builds.Count) {
-            Write-Step ok 'firmware' 'local copy' -Detail 'u checks micropython.org for a newer one'
-            return $builds
-        }
-    }
+# the latest releases decide whether the board needs an update; without the site, the cache stands in
+function Get-Builds([string]$Board) {
     Write-Step wait 'firmware' 'asking micropython.org' -Live
     try {
         $html = Get-WebText "$Base/download/$Board/"
@@ -850,26 +888,38 @@ function Get-VersionChange([string]$Current, [string]$Target) {
     $have = [version]"$($m.Groups[1].Value).$($m.Groups[2].Value).$patch"
     $want = [version]$Target
     if ($have -lt $want -or ($have -eq $want -and $Current -match 'preview')) { return 'update', 'Green' }
-    if ($have -eq $want) { return 'reinstall', 'DarkGray' }
+    if ($have -eq $want) { return 'up to date', 'Green' }
     'downgrade', 'Yellow'
 }
 
+# install and update happen on their own; up to date and downgrade wait for a choice
+function Test-FlashNeeded([string]$Change) {
+    $Change -eq 'install' -or $Change -eq 'update'
+}
+
+# draws the card and returns the version change it shows
 function Write-Plan([string]$Board, [string]$Variant, $Build, [string]$Current, [string]$Chip) {
     $change, $color = Get-VersionChange $Current $Build.Version
     $cached = Test-Path -LiteralPath (Join-Path $Cache $Build.Name) -PathType Leaf
+    $version = if ($change -eq 'up to date') {
+        @($Current, 'White', '     ', 'Gray', $change, $color)
+    } else {
+        @($(if ($Current) { $Current } else { 'no MicroPython' }), $(if ($Current) { 'Gray' } else { 'DarkGray' }),
+            "  $($G.Arrow)  ", 'DarkGray', $Build.Version, 'White', '     ', 'Gray', $change, $color)
+    }
     Write-Ui
     Write-Card ($Board + $(if ($Variant) { "-$Variant" })) @(
         , @()
-        , @($(if ($Current) { $Current } else { 'no MicroPython' }), $(if ($Current) { 'Gray' } else { 'DarkGray' }),
-            "  $($G.Arrow)  ", 'DarkGray', $Build.Version, 'White', '     ', 'Gray', $change, $color)
+        , $version
         , @('offset ', 'DarkGray', (Format-Offset $Chip), 'Gray', "   $($G.Mid)   ", 'DarkGray',
             $(if ($cached) { 'cached' } else { 'will be downloaded' }), 'Gray')
         , @()
     )
+    $change
 }
 
 # the actions under the plan: what each does, its key, and the code Main acts on
-function Select-Action($Build, $Builds) {
+function Select-Action($Build, $Builds, [bool]$Needed = $true) {
     $items = @("flash $($Build.Version)", 'erase + flash')
     $hints = @('keeps the files on the board', 'wipes the whole chip, files included')
     $keys = @('f', 'e')
@@ -880,11 +930,13 @@ function Select-Action($Build, $Builds) {
         $keys += 'v'
         $colors += ''
     }
-    $items += @('check online', 'quit')
-    $hints += @('look for a newer release on micropython.org', 'leave the board as it is')
-    $keys += @('u', 'q')
-    $colors += @('', '')
-    $keys[(Select-Item $items '' $hints 0 $keys $colors -Escape ($items.Count - 1) -Always)]
+    $items += 'quit'
+    $hints += 'leave the board as it is'
+    $keys += 'q'
+    $colors += ''
+    $quit = $items.Count - 1
+    $default = if ($Needed) { 0 } else { $quit }
+    $keys[(Select-Item $items '' $hints $default $keys $colors -Escape $quit -Always)]
 }
 
 function Confirm-Erase {
@@ -964,11 +1016,19 @@ function Main {
         $variant = Select-Variant $builds '' $guess
     }
 
+    $auto = $true
     while ($true) {
         $top = Get-Row
         $build = $builds[$variant]
-        Write-Plan $board $variant $build $currentVersion $chip.Name
-        $answer = Select-Action $build $builds
+        $needed = Test-FlashNeeded (Write-Plan $board $variant $build $currentVersion $chip.Name)
+        if ($auto -and $needed -and -not (Wait-Countdown "flash $($build.Version)" $Countdown)) {
+            Clear-Live
+            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "flash $($build.Version)", 'White')
+            $answer = 'f'
+            break
+        }
+        $auto = $false
+        $answer = Select-Action $build $builds $needed
         if ($answer -eq 'q') {
             Write-Ui
             Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'quit, nothing written', 'DarkGray')
@@ -981,12 +1041,6 @@ function Main {
                 break
             }
             Clear-Since $top
-            continue
-        }
-        if ($answer -eq 'u') {
-            Clear-Since $top
-            $builds = Get-Builds $board -CheckOnline
-            if (-not $builds.ContainsKey($variant)) { $variant = Select-Variant $builds '' $guess }
             continue
         }
         if ($answer -eq 'v') {

@@ -1,11 +1,10 @@
 # esp32-mp-flasher
 
-Flashes a stable MicroPython build onto a connected ESP32 board.
-Uses local firmware first; checks online when no local build exists or when requested.
-No arguments, no configuration, nothing to install: it is a Windows PowerShell
-script plus Espressif's standalone `esptool.exe`.
+Installs MicroPython on a connected ESP32 board, or updates it to the latest
+stable release, on its own. No arguments, no configuration, nothing to install:
+it is a Windows PowerShell script plus Espressif's standalone `esptool.exe`.
 
-![The flasher has found an ESP32-S3, picked the octal-PSRAM build and offers to update it from 1.28.0 to 1.29.0](docs/menu.svg)
+![The flasher has found an ESP32-S3 running MicroPython 1.28.0, picked the octal-PSRAM build and counts down to updating it to 1.29.0](docs/screen.svg)
 
 ## Download
 
@@ -28,16 +27,23 @@ the first run downloads the latest one from
 [espressif/esptool releases](https://github.com/espressif/esptool/releases) into
 the `esptool` folder next to the script. To update esptool, delete that folder.
 
-It finds the board, identifies the chip, works out which build belongs on it,
-prints what it is about to do and waits, as in the picture above.
+It finds the board, identifies the chip, works out which build belongs on it
+and looks up the latest stable release on micropython.org. Then:
 
-Every list, this one included, works with the arrows or the mouse wheel, by
-hovering and clicking, or by pressing the row's key. Keys act on a single
-press and work on any keyboard layout. `flash` leaves the filesystem partition
+- **No MicroPython, or an older version** (a preview of the same release counts
+  as older): it shows the plan and flashes after a 5-second countdown, as in
+  the picture above. Any key or click during the countdown opens the menu
+  instead.
+- **Already the latest, or newer**: nothing is written. The menu opens with
+  `quit` selected, so Enter leaves the board as it is.
+
+The menu offers `flash`, `erase + flash`, `other build` and `quit`. It works
+with the arrows or the mouse wheel, by hovering and clicking, or by pressing
+the row's key; keys act on a single press and work on any keyboard layout.
+`flash`, which is also what the countdown runs, leaves the filesystem partition
 alone, so `boot.py` and the rest of the device files survive. `erase + flash`
 wipes the whole chip, including the filesystem, and asks again first.
-`other build` lists the available variants in case the guess is wrong.
-`check online` looks for the latest stable releases on the website. While
+`other build` lists the available variants in case the guess is wrong. While
 esptool works, a progress bar replaces its output; if it fails, the tail of
 that output is shown with the error.
 
@@ -87,13 +93,13 @@ CDC. The script waits for whichever port appears and reads the banner there.
 
 ## Offline use
 
-The script first looks in the `firmware` folder next to `esp32-mp-flasher.ps1`. If matching
-files exist, it uses the newest local stable release for each available variant
-without making any network requests. This folder travels with the script,
-and its location does not depend on the user profile or working directory.
-If the guessed variant is unavailable, it selects the only available variant
-or asks you to choose. Press `u` to check for online updates; if the site is
-unreachable, it keeps using local firmware.
+Every downloaded build is kept in the `firmware` folder next to
+`esp32-mp-flasher.ps1` and is not downloaded again. This folder travels with
+the script, and its location does not depend on the user profile or working
+directory. When micropython.org cannot be reached, the script says so and
+treats the newest stable release in that folder, per variant, as the latest:
+the same rules then decide whether to flash. If the guessed variant is
+unavailable, it selects the only available variant or asks you to choose.
 
 Before going offline, run the script once while online: that fetches
 `esptool.exe` and caches the board's firmware. Repeat for any other board or

@@ -62,7 +62,7 @@ Test 'offline uses existing cache without downloading' {
     $requests = @{ n = 0 }
     function Get-WebText { $requests.n++; throw 'offline' }
     function Save-Url { throw 'network request' }
-    $builds = Get-Builds $Board -CheckOnline
+    $builds = Get-Builds $Board
     $result = Get-Firmware $builds[''].Url $builds[''].Name
     Assert-Equal $path $result 'path'
     Assert-Equal 1 $requests.n 'requests'
@@ -79,13 +79,13 @@ Test 'online uses catalog even with older cached firmware' {
     Store $BaseBuild | Out-Null
     $newer = 'ESP32_GENERIC_S3-20260101-v1.27.0.bin'
     function Get-WebText { "<a href=`"/resources/firmware/$newer`">download</a>" }
-    $builds = Get-Builds $Board -CheckOnline
+    $builds = Get-Builds $Board
     Assert-Equal $newer $builds[''].Name 'name'
 }
 
-Test 'local firmware does not attempt any network request' {
+Test 'cached firmware is used without downloading it again' {
     Store $BaseBuild | Out-Null
-    function Get-WebText { throw 'network request' }
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
     function Save-Url { throw 'network request' }
     $builds = Get-Builds $Board
     $path = Get-Firmware $builds[''].Url $builds[''].Name
@@ -129,24 +129,58 @@ Test 'serial ports are parsed from plug and play ids' {
     Assert-Equal 'False' (Get-PortClass (ConvertTo-SerialPort 'x (COM3)' 'USB\VID_303A&PID_4001\1'))[1] 'cdc flashable'
 }
 
-Test 'offline main can flash when only octal variant is cached' {
-    $path = Store $Octal
+# runs Main against a board whose REPL reports $Running (empty: no MicroPython); returns the flash calls
+function Invoke-MainOn([string]$Running, [string[]]$Menu = @()) {
     $flashed = New-Object System.Collections.Generic.List[object]
+    $menus = New-Object System.Collections.Generic.List[string]
+    $banner = if ($Running) { "MicroPython v$Running on 2026-01-01; Generic ESP32S3 module with ESP32S3`r`n>>> " } else { '' }
     function Initialize-Esptool {}
     function Select-Port { 'COM5' }
-    function Get-PortLabel { 'test adapter' }
-    function Read-Banner { '' }
+    function Read-Banner { $banner }
     function Get-Chip { [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB' } }
-    function Select-Item { 0 }
+    function Select-Item([string[]]$Items, $Title, $Hints, [int]$Default) {
+        if ($Items.Count -eq 1) { return 0 }
+        $menus.Add($Items[$Default])
+        if ($menus.Count -gt $Menu.Count) { throw "unexpected menu: $($Items -join ', ')" }
+        [array]::IndexOf($Items, $Menu[$menus.Count - 1])
+    }
     function Get-PortSnapshot { 'COM5' }
     function Wait-Board { 'COM5' }
     function Start-Sleep {}
-    function Get-WebText { throw 'offline' }
     function Save-Url { throw 'network request' }
     function Invoke-Flash($Port, $Chip, $Path, $Erase) { $flashed.Add(@($Port, $Chip, $Path, $Erase)); 115200 }
     Main
-    Assert-Equal 1 $flashed.Count 'flash calls'
-    Assert-Equal "COM5 ESP32-S3 $path False" ($flashed[0] -join ' ') 'flash arguments'
+    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus }
+}
+
+Test 'offline main can flash when only octal variant is cached' {
+    $path = Store $Octal
+    function Get-WebText { throw 'offline' }
+    $run = Invoke-MainOn ''
+    Assert-Equal 1 $run.Flashed.Count 'flash calls'
+    Assert-Equal "COM5 ESP32-S3 $path False" ($run.Flashed[0] -join ' ') 'flash arguments'
+}
+
+Test 'a board without micropython or with an older one is flashed without asking' {
+    $path = Store $BaseBuild
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
+    foreach ($running in '', '1.25.0', '1.26.1-preview.3.gabc') {
+        $run = Invoke-MainOn $running
+        Assert-Equal 1 $run.Flashed.Count "flash calls for '$running'"
+        Assert-Equal "COM5 ESP32-S3 $path False" ($run.Flashed[0] -join ' ') "flash arguments for '$running'"
+    }
+}
+
+Test 'an up to date or newer board is left alone until asked' {
+    Store $BaseBuild | Out-Null
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
+    foreach ($running in '1.26.1', '1.27.0') {
+        $run = Invoke-MainOn $running @('quit')
+        Assert-Equal 0 $run.Flashed.Count "flash calls for $running"
+        Assert-Equal 'quit' $run.Defaults[0] "preselected action for $running"
+    }
+    $run = Invoke-MainOn '1.26.1' @('flash 1.26.1')
+    Assert-Equal 1 $run.Flashed.Count 'flash on request'
 }
 
 Test 'esptool progress lines are parsed' {
@@ -182,7 +216,7 @@ Test 'version change is classified' {
     Assert-Equal 'install' (Get-VersionChange '' '1.29.0')[0] 'unknown'
     Assert-Equal 'update' (Get-VersionChange '1.28.0' '1.29.0')[0] 'older'
     Assert-Equal 'update' (Get-VersionChange '1.29.0-preview.12.gabc' '1.29.0')[0] 'preview'
-    Assert-Equal 'reinstall' (Get-VersionChange '1.29.0' '1.29.0')[0] 'same'
+    Assert-Equal 'up to date' (Get-VersionChange '1.29.0' '1.29.0')[0] 'same'
     Assert-Equal 'downgrade' (Get-VersionChange '1.30.1' '1.29.0')[0] 'newer'
 }
 
