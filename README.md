@@ -44,5 +44,4 @@ whole folder.
 ## Development
 
 Tests: `powershell -ExecutionPolicy Bypass -File micropython-esp-flasher.Tests.ps1`.
-A clone has no `esptool.exe`; the first run downloads it. `bench.cmd` times
-flashing at several baud rates and erases the chip.
+A clone has no `esptool.exe`; the first run downloads it.

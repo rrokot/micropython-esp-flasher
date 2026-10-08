@@ -2,5 +2,4 @@
 *.bin
 *.bin.part
 esptool/
-bench.txt
 logs/

@@ -537,7 +537,7 @@ Test 'the repl is reached even when opening the port reset the board' {
 
     $old = New-FakeBoard -NoPaste
     Connect-Repl $old | Out-Null
-    Assert-Equal '1.29.0' (ConvertFrom-Probe (Invoke-Repl $old $BoardProbe)).Version 'a board without raw-paste mode'
+    Assert-Throws { Invoke-Repl $old $BoardProbe } 'older than 1.14'
 
     $other = New-FakeBoard -Silent
     Assert-Equal 'False' (Connect-Repl $other 200) 'other firmware never shows a prompt'

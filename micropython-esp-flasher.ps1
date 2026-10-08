@@ -14,12 +14,13 @@ $WriteOptions = @{
     'ESP8266' = @('--flash-size', 'detect')
 }
 
-# the port MicroPython's own USB opens: the REPL only, gone when the chip resets, so esptool
-# cannot flash through it. every other Espressif USB device is a chip's own USB and is probed
+# a chip's own USB. the one exception is the port MicroPython's USB opens: the REPL only, gone
+# when the chip resets, so esptool cannot flash through it
+$EspressifVid = 0x303A
 $FirmwareUsb = '303a:4001'
 
 $KnownVendors = @{
-    0x303A = 'Espressif USB'
+    ($EspressifVid) = 'Espressif USB'
     0x0403 = 'FTDI bridge'
     0x067B = 'Prolific bridge'
     0x10C4 = 'Silicon Labs bridge'
@@ -163,6 +164,11 @@ function Write-Step([string]$State, [string]$Label, [string]$Value, [ConsoleColo
     Write-Line $parts -Live:$Live
 }
 
+# the line that says what was decided for a board: flash, erase + flash, skipped
+function Write-Choice([string]$Text, [ConsoleColor]$Mark = 'Cyan', [ConsoleColor]$Color = 'White') {
+    Write-Line @('  ', 'Gray', "$($G.Pointer) ", $Mark, $Text, $Color)
+}
+
 function Write-Note([string]$Text) {
     foreach ($line in $Text -split "`n") {
         Write-Line @('              ', 'Gray', $line, 'DarkGray')
@@ -245,13 +251,6 @@ function Fail([string]$Message, [string]$Details = '') {
     $e.Data['expected'] = $true
     $e.Data['details'] = $Details
     throw $e
-}
-
-function Read-Line([string]$Prompt) {
-    Write-Ui $Prompt -NoNewline
-    $line = [Console]::ReadLine()
-    if ($null -eq $line) { Fail 'input closed' }
-    $line.Trim()
 }
 
 # [Console]::ReadKey never sees the mouse; ReadConsoleInput does once mouse input is on.
@@ -423,18 +422,6 @@ function Select-Item {
     $selected = [math]::Max(0, [math]::Min($Default, $Items.Count - 1))
     Write-Log "menu $(if ($Title) { "'$Title' " })[$($Items -join ' | ')], preselected '$($Items[$selected])'"
 
-    if (-not $Interactive) {
-        if ($Title) { Write-Ui "  $Title" }
-        for ($i = 0; $i -lt $Items.Count; $i++) { Write-Ui "    $($Keys[$i])  $($Items[$i])  $($Hints[$i])" }
-        while ($true) {
-            $index = [array]::IndexOf($Keys, (Read-Line '  > ').ToLower())
-            if ($index -ge 0) {
-                Write-Log "chose '$($Items[$index])'"
-                return $index
-            }
-        }
-    }
-
     $width = ($Items | Measure-Object -Property Length -Maximum).Maximum
     $keyWidth = ($Keys | Measure-Object -Property Length -Maximum).Maximum + 2
     # a cleared status line already leaves the gap above the menu
@@ -528,7 +515,7 @@ function Get-EsptoolPercent([string]$Line) {
 }
 
 # runs esptool.exe and, with a label, animates a status line while it works
-function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [string]$Label = '', [string]$Phase = 'connecting', [switch]$Bar) {
+function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [string]$Label = '', [switch]$Bar) {
     $cmd = @('--port', $Port)
     if ($Baud) { $cmd += @('--baud', "$Baud") }
     $cmd += $Arguments
@@ -540,6 +527,7 @@ function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [st
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
 
+    $phase = 'connecting'
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $process = [System.Diagnostics.Process]::Start($info)
     try {
@@ -554,14 +542,14 @@ function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [st
                     $line = $pending[$i].Result
                     if ($null -eq $line) { $pending[$i] = $null; break }
                     $lines.Add($line)
-                    $Phase = Get-EsptoolPhase $line $Phase
+                    $phase = Get-EsptoolPhase $line $phase
                     $percent = Get-EsptoolPercent $line
                     if ($percent -ge 0) { $fraction = $percent }
                     $pending[$i] = $readers[$i].ReadLineAsync()
                 }
             }
             if ($Label) {
-                $text = [string]::Format($Inv, '{0}   {1:0.0}s', $Phase, $watch.Elapsed.TotalSeconds)
+                $text = [string]::Format($Inv, '{0}   {1:0.0}s', $phase, $watch.Elapsed.TotalSeconds)
                 Write-Activity $Label $text $frame $fraction -Bar:$Bar
             }
             $frame++
@@ -684,7 +672,7 @@ function Format-Offset([int]$Offset) {
 }
 
 function Test-PartitionEntry([byte[]]$Bytes, [int]$At) {
-    $Bytes[$At] -eq 0xAA -and $Bytes[$At + 1] -eq 0x50 -and $Bytes[$At + 2] -le 1 -and
+    $At + 32 -le $Bytes.Length -and $Bytes[$At] -eq 0xAA -and $Bytes[$At + 1] -eq 0x50 -and $Bytes[$At + 2] -le 1 -and
         [BitConverter]::ToUInt32($Bytes, $At + 4) % 0x1000 -eq 0 -and [BitConverter]::ToUInt32($Bytes, $At + 8) -gt 0
 }
 
@@ -706,13 +694,10 @@ function Read-ImageHead([string]$Path) {
 }
 
 # an ESP32 image holds the flash from the bootloader on, and the partition table always sits at
-# 0x8000, so where the table lies in the file tells where the file goes. ESP8266 boots from 0
-function Get-FlashOffset([string]$Chip, [string]$Path) {
-    if ($Chip -eq 'ESP8266') { return 0 }
-    $bytes = Read-ImageHead $Path
+# 0x8000, so where the table lies in the image tells where the image goes
+function Find-ImageOffset([byte[]]$Bytes, [string]$Path) {
     $found = @(for ($offset = 0; $offset -lt 0x8000; $offset += 0x1000) {
-            $at = 0x8000 - $offset
-            if ($at + 32 -le $bytes.Length -and (Test-PartitionEntry $bytes $at)) { $offset }
+            if (Test-PartitionEntry $Bytes (0x8000 - $offset)) { $offset }
         })
     if ($found.Count -ne 1) {
         Fail ("cannot tell where $(Split-Path -Leaf $Path) goes in flash`n" +
@@ -721,13 +706,19 @@ function Get-FlashOffset([string]$Chip, [string]$Path) {
     $found[0]
 }
 
+# ESP8266 boots from 0
+function Get-FlashOffset([string]$Chip, [string]$Path) {
+    if ($Chip -eq 'ESP8266') { return 0 }
+    Find-ImageOffset (Read-ImageHead $Path) $Path
+}
+
 # where the image's MicroPython keeps its files: the vfs partition when the table has one, else
 # right after the last partition, to the end of the flash. $null for ESP8266, which has no table
 function Get-FsStart([string]$Chip, [string]$Path) {
     if ($Chip -eq 'ESP8266') { return $null }
     $bytes = Read-ImageHead $Path
     $end = 0
-    for ($at = 0x8000 - (Get-FlashOffset $Chip $Path); $at + 32 -le $bytes.Length -and (Test-PartitionEntry $bytes $at); $at += 32) {
+    for ($at = 0x8000 - (Find-ImageOffset $bytes $Path); Test-PartitionEntry $bytes $at; $at += 32) {
         $start = [BitConverter]::ToUInt32($bytes, $at + 4)
         if ([System.Text.Encoding]::ASCII.GetString($bytes, $at + 12, 16).TrimEnd([char]0) -eq 'vfs') { return [long]$start }
         $end = [math]::Max($end, [long]$start + [BitConverter]::ToUInt32($bytes, $at + 8))
@@ -771,7 +762,7 @@ function Format-PortIds($Port) {
 # through: the chip's own USB, then bridges. probing through a bridge resets the chip, and with it
 # the USB port of a board plugged in by both cables; probing through its USB leaves the bridge alone
 function Get-PortRank($Port) {
-    if ($Port.VendorId -eq 0x303A) { 0 } else { 1 }
+    if ($Port.VendorId -eq $EspressifVid) { 0 } else { 1 }
 }
 
 # flashable ports in probing order, notes on the ones skipped, and the unknown adapters,
@@ -855,7 +846,7 @@ function Open-SerialPort([string]$Port) {
     # they at least do not reset it again on close. Espressif's own USB needs DTR up for
     # TinyUSB CDC to talk, and has no such circuit
     $device = @(Get-SerialPorts | Where-Object { $_.Device -eq $Port }) | Select-Object -First 1
-    $native = -not $device -or $device.VendorId -eq 0x303A
+    $native = -not $device -or $device.VendorId -eq $EspressifVid
     $serial = New-Object System.IO.Ports.SerialPort $Port, 115200
     $serial.ReadTimeout = 400
     $serial.WriteTimeout = 2000
@@ -908,50 +899,41 @@ function Read-ReplByte($Serial, [int]$Patience) {
 
 # runs code in the raw REPL and returns what it printed; what it raised becomes the failure.
 # the code goes in raw-paste mode, as mpremote sends it: the board names a window and grants
-# each one again once it has taken it in, so nothing arrives it has no room for. a board older
-# than MicroPython 1.14 says no, and gets the code in pieces with pauses, as pyboard.py did
+# each one again once it has taken it in, so nothing arrives it has no room for. MicroPython
+# has had it since 1.14
 function Invoke-Repl($Serial, [string]$Code, [int]$Patience = 5000) {
     # anything still unread belongs to before this code, and would hide its answer
     [void]$Serial.ReadExisting()
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Code)
     $Serial.Write([byte[]](5, 65, 1), 0, 3)
-    if ((Read-ReplByte $Serial 1000) -eq 82 -and (Read-ReplByte $Serial 1000) -eq 1) {
-        $window = (Read-ReplByte $Serial 1000) + 256 * (Read-ReplByte $Serial 1000)
-        $room = $window
-        for ($i = 0; $i -lt $bytes.Length; $i += $sent) {
-            while ($room -eq 0 -or $Serial.BytesToRead) {
-                $answer = Read-ReplByte $Serial $Patience
-                if ($answer -eq 1) { $room += $window }
-                else { $Serial.Write([byte[]](4), 0, 1); Fail 'the board stopped taking the code' "answered $answer" }
-            }
-            $sent = [math]::Min($room, $bytes.Length - $i)
-            $Serial.Write($bytes, $i, $sent)
-            $room -= $sent
-        }
-        $Serial.Write([byte[]](4), 0, 1)
-        # the board acknowledges the end with Ctrl-D, late window grants aside, then runs it
-        do { $answer = Read-ReplByte $Serial $Patience } while ($answer -eq 1)
-        if ($answer -ne 4) { Fail 'the board did not take the code' "answered $answer" }
-        $reply = 'OK'
-    } else {
-        Start-Sleep -Milliseconds 200
-        [void]$Serial.ReadExisting()
-        for ($i = 0; $i -lt $bytes.Length; $i += 256) {
-            $Serial.Write($bytes, $i, [math]::Min(256, $bytes.Length - $i))
-            Start-Sleep -Milliseconds 10
-        }
-        $Serial.Write([byte[]](4), 0, 1)
-        $reply = ''
+    if ((Read-ReplByte $Serial 1000) -ne 82 -or (Read-ReplByte $Serial 1000) -ne 1) {
+        Fail 'no raw-paste mode, MicroPython older than 1.14'
     }
-    # "OK" in plain raw mode, the output, Ctrl-D, the error, Ctrl-D, ">"; the wait restarts while
-    # data flows
+    $window = (Read-ReplByte $Serial 1000) + 256 * (Read-ReplByte $Serial 1000)
+    $room = $window
+    for ($i = 0; $i -lt $bytes.Length; $i += $sent) {
+        while ($room -eq 0 -or $Serial.BytesToRead) {
+            $answer = Read-ReplByte $Serial $Patience
+            if ($answer -eq 1) { $room += $window }
+            else { $Serial.Write([byte[]](4), 0, 1); Fail 'the board stopped taking the code' "answered $answer" }
+        }
+        $sent = [math]::Min($room, $bytes.Length - $i)
+        $Serial.Write($bytes, $i, $sent)
+        $room -= $sent
+    }
+    $Serial.Write([byte[]](4), 0, 1)
+    # the board acknowledges the end with Ctrl-D, late window grants aside, then runs it
+    do { $answer = Read-ReplByte $Serial $Patience } while ($answer -eq 1)
+    if ($answer -ne 4) { Fail 'the board did not take the code' "answered $answer" }
+    # then the output, Ctrl-D, the error, Ctrl-D, ">"; the wait restarts while data flows
+    $reply = ''
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($reply -notmatch "^OK[\s\S]*\x04[\s\S]*\x04" -and $watch.ElapsedMilliseconds -lt $Patience) {
+    while ($reply -notmatch "\x04[\s\S]*\x04" -and $watch.ElapsedMilliseconds -lt $Patience) {
         Start-Sleep -Milliseconds 20
         $more = $Serial.ReadExisting()
         if ($more) { $reply += $more; $watch.Restart() }
     }
-    $m = [regex]::Match($reply, "^OK([\s\S]*?)\x04([\s\S]*?)\x04")
+    $m = [regex]::Match($reply, "^([\s\S]*?)\x04([\s\S]*?)\x04")
     if (-not $m.Success) { Fail 'the board stopped answering' $reply }
     if ($m.Groups[2].Value.Trim()) { Fail 'the board raised an error' $m.Groups[2].Value }
     $m.Groups[1].Value
@@ -963,8 +945,8 @@ function Disconnect-Repl($Serial) {
 }
 
 # what a board running MicroPython tells of itself: the version, the build it names (as in
-# ESP32_GENERIC_S3-SPIRAM_OCT, since 1.24), the PSRAM it found (the one heap region of a
-# megabyte or more; external PSRAM esptool cannot see), and where its filesystem starts
+# ESP32_GENERIC_S3-SPIRAM_OCT, since 1.24), and on ESP32 the PSRAM it found (the one heap
+# region of a megabyte or more; external PSRAM esptool cannot see) and where its files start
 $BoardProbe = @'
 import os, sys
 u = os.uname()
@@ -977,8 +959,7 @@ try:
     print('psram=%d' % (big if big >= 1 << 20 else 0))
     print('fs=%d' % esp32.Partition.find(esp32.Partition.TYPE_DATA, label='vfs')[0].info()[2])
 except ImportError:
-    import flashbdev
-    print('fs=%d' % (flashbdev.bdev.start_sec * 4096))
+    pass
 '@
 
 function ConvertFrom-Probe([string]$Text) {
@@ -994,11 +975,11 @@ function ConvertFrom-Probe([string]$Text) {
 }
 
 # the board's own account of itself, or $null when no MicroPython answers
-function Read-Board([string]$Port, [int]$Patience = 3000) {
+function Read-Board([string]$Port) {
     try {
         $serial = Open-SerialPort $Port
         try {
-            if (-not (Connect-Repl $serial $Patience)) { return $null }
+            if (-not (Connect-Repl $serial)) { return $null }
             $reply = Invoke-Repl $serial $BoardProbe
             Write-Log "board on ${Port}:`n$reply"
             ConvertFrom-Probe $reply
@@ -1013,15 +994,10 @@ function Read-Board([string]$Port, [int]$Patience = 3000) {
 
 # with -Optional, a port that does not answer gives $null, and esptool's words go to $ChipOutput
 function Get-Chip([string]$Port, [switch]$Optional) {
-    $m = $null
-    for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        $phase = if ($attempt) { 'no answer, retrying' } else { 'connecting' }
-        $out = (Invoke-Esptool $Port 'flash-id' -Label 'chip' -Phase $phase).Output
-        # esptool names the family here (ESP32, ESP32-C5, ESP8266); "Chip type" gives the package
-        $m = [regex]::Match($out, 'Connected to (ESP[\w-]+) on ')
-        if ($m.Success) { break }
-        if ($attempt -eq 0) { Start-Sleep -Milliseconds 1500 }
-    }
+    # esptool retries the connection itself; it names the family here (ESP32, ESP32-C5,
+    # ESP8266), while "Chip type" gives the package
+    $out = (Invoke-Esptool $Port 'flash-id' -Label 'chip').Output
+    $m = [regex]::Match($out, 'Connected to (ESP[\w-]+) on ')
     if (-not $m.Success) {
         if ($Optional) {
             Write-Step skip 'chip' "no ESP chip answered on $Port" DarkGray
@@ -1151,7 +1127,7 @@ function Test-FilesMove([string]$Chip, [string]$Path, $Running, $RunningVariant,
 
 function Select-Variant($Builds, [string]$Current = '', [string]$Guess = '') {
     $keys = @($Builds.Keys | Sort-Object)
-    $names = @($keys | ForEach-Object { if ($_) { $_ } else { 'base' } })
+    $names = @($keys | ForEach-Object { Format-Variant $_ })
     $hints = @($keys | ForEach-Object {
             $hint = $Builds[$_].Version
             if ($_ -eq $Guess) { $hint += '   matches this board' }
@@ -1234,7 +1210,7 @@ function Select-Action($Build, $Builds, [bool]$Needed = $true) {
     $colors = @('', 'Yellow')
     if ($Builds.Count -gt 1) {
         $items += 'other build'
-        $hints += (@($Builds.Keys | Sort-Object | ForEach-Object { if ($_) { $_ } else { 'base' } }) -join ', ')
+        $hints += (@($Builds.Keys | Sort-Object | ForEach-Object { Format-Variant $_ }) -join ', ')
         $keys += 'v'
         $colors += ''
     }
@@ -1376,14 +1352,14 @@ function Update-Board($Target, $Catalog) {
             Write-Ui
         }
         if ($answer -eq 's') {
-            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'skipped, nothing written', 'DarkGray')
+            Write-Choice 'skipped, nothing written' DarkGray DarkGray
             $result.Outcome = 'skipped'
             return $result
         }
         if ($answer -eq 'e') {
-            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Yellow', 'erase + flash', 'White')
+            Write-Choice 'erase + flash' Yellow
         } else {
-            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "flash $($build.Version)", 'White')
+            Write-Choice "flash $($build.Version)"
         }
         break
     }
@@ -1398,11 +1374,11 @@ function Update-Board($Target, $Catalog) {
             -Escape 0 -EscapeHint 'cancel' -TitleColor Yellow -Always
         Write-Ui
         if ($choice -eq 0) {
-            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'cancelled, nothing written', 'DarkGray')
+            Write-Choice 'cancelled, nothing written' DarkGray DarkGray
             $result.Outcome = 'skipped'
             return $result
         }
-        Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Yellow', 'erase + flash', 'White')
+        Write-Choice 'erase + flash' Yellow
         Write-Ui
         $answer = 'e'
     }
@@ -1459,9 +1435,7 @@ function Update-Boards($Targets, $Catalog, [switch]$Alone) {
             if ($Alone) { throw }
             Write-Failure $_
             $script:BoardFailures++
-            [pscustomobject]@{
-                Port = $target.Port; Chip = $target.Chip.Name; From = $target.Version; To = ''; Outcome = 'failed'
-            }
+            [pscustomobject]@{ Port = $target.Port; Chip = $target.Chip.Name; From = $target.Running.Version; To = ''; Outcome = 'failed' }
         }
     }
 }
@@ -1519,7 +1493,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     Start-Log
     try {
         if ($Interactive) { [Console]::CursorVisible = $false }
-        if ([Console]::IsInputRedirected) { Fail 'run this from a console' }
+        if ([Console]::IsInputRedirected -or -not $Interactive) { Fail 'run this from a console' }
         Main
         if ($BoardFailures) { $status = 1 }
     } catch {
