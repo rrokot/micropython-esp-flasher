@@ -67,6 +67,42 @@ $Interactive = -not [Console]::IsOutputRedirected
 $Inv = [System.Globalization.CultureInfo]::InvariantCulture
 $LiveOpen = $false
 
+$LogDir = Join-Path $PSScriptRoot 'logs'
+$LogKeep = 30
+$LogPath = $null
+$LogMuted = $false
+
+
+# ------------------------------------------------------------------------ log
+
+# one file per run in logs\ next to the script: what the screen showed, plus what it did not,
+# such as esptool's full output, REPL replies, port ids, choices and stack traces.
+# only the newest $LogKeep files stay; a folder that cannot be written just means no log
+function Start-Log {
+    try {
+        New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+        Get-ChildItem -LiteralPath $LogDir -Filter '*.log' -File | Sort-Object Name -Descending |
+            Select-Object -Skip ($LogKeep - 1) | Remove-Item -Force -ErrorAction SilentlyContinue
+        $script:LogPath = Join-Path $LogDir ((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss', $Inv) + '.log')
+        Write-Log ("micropython-esp-flasher   PowerShell $($PSVersionTable.PSVersion)   " +
+            "$([Environment]::OSVersion.VersionString)   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')")
+    } catch {
+        $script:LogPath = $null
+    }
+}
+
+function Write-Log([string]$Text) {
+    if (-not $LogPath) { return }
+    $lines = @(($Text -replace "`r`n", "`n" -replace "`r", "`n").TrimEnd("`n") -split "`n")
+    $stamp = (Get-Date).ToString('HH:mm:ss.fff', $Inv)
+    $body = (@("$stamp  $($lines[0])") + @($lines | Select-Object -Skip 1 | ForEach-Object { "              $_" })) -join "`r`n"
+    try {
+        [System.IO.File]::AppendAllText($LogPath, $body + "`r`n", (New-Object System.Text.UTF8Encoding $false))
+    } catch {
+        $script:LogPath = $null
+    }
+}
+
 
 # ---------------------------------------------------------------- terminal ui
 
@@ -84,6 +120,10 @@ function Get-Row {
 
 # parts alternate text and color; a live line is redrawn in place until a normal one replaces it
 function Write-Line([object[]]$Parts = @(), [switch]$Live) {
+    if (-not $Live -and -not $LogMuted) {
+        $all = (@(for ($i = 0; $i -lt $Parts.Count; $i += 2) { [string]$Parts[$i] }) -join '').Trim()
+        if ($all) { Write-Log $all }
+    }
     if ($Live -and -not $Interactive) { return }
     $width = Get-Width
     $used = 0
@@ -186,6 +226,8 @@ function Write-Failure($ErrorRecord) {
     Close-Live
     Write-Ui
     $exception = $ErrorRecord.Exception
+    Write-Log ("error: $($exception.Message)`n$([string]$exception.Data['details'])`n" +
+        ($ErrorRecord | Out-String) + $ErrorRecord.ScriptStackTrace)
     if ($exception.Data['expected']) {
         $lines = @($exception.Message -split "`n")
         Write-Ui "  $($G.Dot) $($lines[0])" Red
@@ -306,6 +348,7 @@ function Initialize-Input {
             if (-not ('EspFlasherInput' -as [type])) { Add-Type -TypeDefinition $ConsoleInputSource }
             $script:InputReady = $true
         } catch {
+            Write-Log "mouse input unavailable, keyboard only: $($_.Exception.Message)"
             $script:InputReady = $false
         }
     }
@@ -351,9 +394,13 @@ function Wait-Countdown([string]$Action, [int]$Seconds) {
             $left = $Seconds - [math]::Floor($watch.ElapsedMilliseconds / 1000)
             Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', $Action, 'White', " in $left s", 'Cyan',
                 '   any key or click for options', 'DarkGray') -Live
-            if (Test-Pressed) { return $true }
+            if (Test-Pressed) {
+                Write-Log ([string]::Format($Inv, 'countdown to {0}: interrupted after {1:0.0} s', $Action, $watch.Elapsed.TotalSeconds))
+                return $true
+            }
             Start-Sleep -Milliseconds 50
         }
+        Write-Log "countdown to ${Action}: ran out"
         $false
     } finally {
         Restore-Mouse $mode
@@ -378,13 +425,18 @@ function Select-Item {
     if (-not $Keys) { $Keys = @(1..$Items.Count | ForEach-Object { if ($_ -le 9) { "$_" } else { '' } }) }
     $cleared = $LiveOpen
     Clear-Live
+    $selected = [math]::Max(0, [math]::Min($Default, $Items.Count - 1))
+    Write-Log "menu $(if ($Title) { "'$Title' " })[$($Items -join ' | ')], preselected '$($Items[$selected])'"
 
     if (-not $Interactive) {
         if ($Title) { Write-Ui "  $Title" }
         for ($i = 0; $i -lt $Items.Count; $i++) { Write-Ui "    $($Keys[$i])  $($Items[$i])  $($Hints[$i])" }
         while ($true) {
             $index = [array]::IndexOf($Keys, (Read-Line '  > ').ToLower())
-            if ($index -ge 0) { return $index }
+            if ($index -ge 0) {
+                Write-Log "chose '$($Items[$index])'"
+                return $index
+            }
         }
     }
 
@@ -393,8 +445,8 @@ function Select-Item {
     # a cleared status line already leaves the gap above the menu
     $start = Get-Row
     if (-not $cleared) { Write-Ui }
+    $script:LogMuted = $true
     if ($Title) { Write-Line @('  ', 'Gray', $Title, $TitleColor) }
-    $selected = [math]::Max(0, [math]::Min($Default, $Items.Count - 1))
     $drawn = -1
     $top = -1
     $chosen = -1
@@ -445,7 +497,9 @@ function Select-Item {
         }
     } finally {
         Restore-Mouse $mode
+        $script:LogMuted = $false
     }
+    Write-Log "chose '$($Items[$chosen])' by $(if ($e.Kind -eq 'key') { "key $($e.Key)" } else { $e.Kind })"
     Clear-Since $start
     $chosen
 }
@@ -519,6 +573,11 @@ function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [st
             Start-Sleep -Milliseconds 80
         }
         $process.WaitForExit()
+        # the progress lines run to hundreds; the last one says how far it got
+        $progress = @($lines | Where-Object { $_ -match '^Writing at ' })
+        $kept = @($lines | Where-Object { $_ -notmatch '^Writing at ' -or $_ -eq $progress[-1] })
+        Write-Log ([string]::Format($Inv, "esptool {0}`nexit {1} after {2:0.0} s`n{3}",
+                $info.Arguments, $process.ExitCode, $watch.Elapsed.TotalSeconds, ($kept -join "`n")))
         [pscustomobject]@{
             Code    = $process.ExitCode
             Output  = ($lines -join "`n")
@@ -532,6 +591,7 @@ function Invoke-Esptool([string]$Port, [string[]]$Arguments, [int]$Baud = 0, [st
 
 # returns the advertised length, or -1 when the server did not send one
 function Save-Url([string]$Url, [string]$Path, [string]$Label = '') {
+    Write-Log "download $Url"
     $request = [System.Net.HttpWebRequest]::Create($Url)
     $request.Timeout = 10000
     $request.ReadWriteTimeout = 10000
@@ -559,6 +619,7 @@ function Save-Url([string]$Url, [string]$Path, [string]$Label = '') {
         } finally {
             $output.Dispose()
         }
+        Write-Log "downloaded $done bytes, server announced $total"
         $total
     } finally {
         $response.Dispose()
@@ -566,6 +627,7 @@ function Save-Url([string]$Url, [string]$Path, [string]$Label = '') {
 }
 
 function Get-WebText([string]$Url) {
+    Write-Log "fetch $Url"
     (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 10).Content
 }
 
@@ -714,6 +776,7 @@ function Find-Ports {
     $cdc = $false
     foreach ($p in $ports) {
         $label, $flashable = Get-PortClass $p
+        Write-Log "port $($p.Device) $(Format-PortIds $p) $label$(if ($flashable) { ', to probe' })"
         $entry = [pscustomobject]@{ Device = $p.Device; Hint = "$label  $(Format-PortIds $p)"; Rank = Get-PortRank $p
             Number = [int]($p.Device -replace '\D', '') }
         if ($flashable) {
@@ -755,12 +818,17 @@ function Wait-Board([string[]]$Before, [string]$Previous, [int]$Timeout = 20) {
         $now = Get-PortSnapshot
         $appeared = @($now | Where-Object { $Before -notcontains $_ } | Sort-Object)
         if ($appeared) {
+            Write-Log "after reset: new port $($appeared -join ', '), ports now $($now -join ', ')"
             Start-Sleep -Milliseconds 1000
             return $appeared[0]
         }
-        if ($now -contains $Previous) { return $Previous }
+        if ($now -contains $Previous) {
+            Write-Log "after reset: $Previous is back, ports now $($now -join ', ')"
+            return $Previous
+        }
         Start-Sleep -Milliseconds 500
     }
+    Write-Log "after reset: no port came back within $Timeout s, staying on $Previous"
     $Previous
 }
 
@@ -787,11 +855,13 @@ function Read-Banner([string]$Port) {
                 Start-Sleep -Milliseconds 50
                 $text += $serial.ReadExisting()
             }
+            Write-Log "repl on ${Port} replied:`n$(if ($text) { $text } else { '(nothing)' })"
             $text
         } finally {
             $serial.Close()
         }
     } catch {
+        Write-Log "repl on ${Port}: $($_.Exception.Message)"
         ''
     }
 }
@@ -872,6 +942,7 @@ function Get-Builds([string]$Board) {
         $html = Get-WebText "$Base/download/$Board/"
     } catch {
         $builds = Get-CachedBuilds $Board
+        Write-Log "micropython.org unreachable: $($_.Exception.Message)`ncached for ${Board}:`n$(@($builds.Values | ForEach-Object { $_.Name } | Sort-Object) -join "`n")"
         if (-not $builds.Count) {
             Write-Step fail 'firmware' 'offline, nothing cached'
             Fail ("cannot reach micropython.org and no cached firmware for $Board`n" +
@@ -882,6 +953,7 @@ function Get-Builds([string]$Board) {
     }
     $names = @([regex]::Matches($html, '/resources/firmware/[^"]+\.bin') | ForEach-Object { $_.Value.Split('/')[-1] })
     $builds = ConvertTo-Builds $Board $names
+    Write-Log "$($names.Count) files listed for $Board, latest stable per variant:`n$(@($builds.Values | ForEach-Object { $_.Name } | Sort-Object) -join "`n")"
     if (-not $builds.Count) {
         Write-Step fail 'firmware' 'nothing published'
         Fail "no firmware published for $Board"
@@ -1097,6 +1169,8 @@ function Update-Board($Target, $Catalog) {
     }
     $builds = $Catalog[$board]
     $guess = Get-VariantGuess $builds $Target.Banner $chip.PsramMb $chip.FlashSize
+    Write-Log ("$port $($chip.Name): flash $($chip.FlashSize), PSRAM $($chip.PsramMb)MB, MAC $($chip.Mac), " +
+        "running '$($Target.Version)', variant guess '$guess'")
     $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
         Write-Note "the build $port needs is not available, pick one"
@@ -1246,6 +1320,7 @@ function Main {
 if ($MyInvocation.InvocationName -ne '.') {
     $status = 0
     try { $Host.UI.RawUI.WindowTitle = 'micropython-esp-flasher' } catch {}
+    Start-Log
     try {
         if ($Interactive) { [Console]::CursorVisible = $false }
         if ([Console]::IsInputRedirected) { Fail 'run this from a console' }
@@ -1257,8 +1332,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     } finally {
         if ($Interactive) { [Console]::CursorVisible = $true }
     }
+    Write-Log "finished with status $status"
     if (-not [Console]::IsInputRedirected -and -not $Closed) {
         Write-Ui
+        if ($LogPath) { Write-Line @('  ', 'Gray', 'log  ', 'DarkGray', "logs\$(Split-Path -Leaf $LogPath)", 'Gray', '  next to the script', 'DarkGray') }
         Write-Line @('  ', 'Gray', 'press any key to close', 'DarkGray')
         [void][Console]::ReadKey($true)
     }

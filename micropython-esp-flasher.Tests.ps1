@@ -388,6 +388,29 @@ Test 'images are written where they belong, esp8266 with the flash size detected
     Assert-Equal 0 $calls.Count 'nothing erased when the image cannot be placed'
 }
 
+Test 'a run is logged in full, and old logs are pruned' {
+    $LogDir = Join-Path $Cache 'logs'
+    New-Item -ItemType Directory -Path $LogDir | Out-Null
+    foreach ($i in 1..($LogKeep + 5)) { Set-Content -LiteralPath (Join-Path $LogDir ('2020-01-01_00-00-{0:d2}.log' -f $i)) 'old' }
+    Start-Log
+    Assert-Equal $LogKeep @(Get-ChildItem -LiteralPath $LogDir -Filter '*.log').Count 'files kept'
+    if (Test-Path -LiteralPath (Join-Path $LogDir '2020-01-01_00-00-01.log')) { throw 'oldest log not pruned' }
+
+    function Get-Width { 20 }
+    Write-Step ok 'chip' 'ESP32-S3' -Detail 'a detail far wider than the screen'
+    Write-Step wait 'repl' 'listening' -Live
+    Write-Log "two`r`nlines"
+    $script:LogPath = $null
+    Write-Log 'after logging stopped'
+
+    $log = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $LogDir -Filter '*.log' | Sort-Object Name | Select-Object -Last 1).FullName
+    if ($log[0] -notmatch 'micropython-esp-flasher   PowerShell') { throw "header: $($log[0])" }
+    if (-not ($log -match 'chip      ESP32-S3   a detail far wider than the screen$')) { throw 'line truncated or missing' }
+    if ($log -match 'listening') { throw 'live line logged' }
+    if (-not ($log -match '^\d\d:\d\d:\d\d\.\d{3}  two$') -or -not ($log -match '^ {14}lines$')) { throw 'multi-line text' }
+    if ($log -match 'after logging stopped') { throw 'logged without a log' }
+}
+
 Test 'esptool progress lines are parsed' {
     $line = 'Writing at 0x0003c000 [=========>                    ]  33.4% 512.0kB/1.5MB [1s] '
     Assert-Equal 0.334 (Get-EsptoolPercent $line) 'percent'

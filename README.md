@@ -25,6 +25,10 @@ Ports are found on their own. Serial adapters that ESP boards don't use (an
 Arduino, say) are not touched; they are offered at the end in case one is
 an ESP board after all.
 
+Every run writes a log to the `logs` folder, with esptool's full output and
+what each board answered; the last 30 are kept. Attach it when reporting a
+problem.
+
 ## Offline
 
 Downloaded firmware is kept in the `firmware` folder and reused. Without
