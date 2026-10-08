@@ -165,7 +165,7 @@ function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports
         $flashed.Add(@($Port, $Chip, $Path, $Erase)); 115200
     }
     Main
-    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus; Failures = $BoardFailures }
+    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus; Failures = $BoardFailures; Closed = $Closed }
 }
 
 Test 'offline main can flash when only octal variant is cached' {
@@ -215,7 +215,8 @@ Test 'ports are probed download mode first, then jtag, then bridges; unknown ada
     function Get-SerialPorts { New-Port 'COM5' 0x10C4 0xEA60; New-Port 'COM4' 0x303A 0x0009 }
     Assert-Equal 'COM4' (Find-Ports).Ports[0].Device 'download mode first'
     function Get-SerialPorts { New-Port 'COM3' 0x2341 0x0043 }
-    Assert-Throws { Find-Ports } 'no ESP32 board among the serial ports'
+    $found = Find-Ports
+    Assert-Equal '0 COM3' "$($found.Ports.Count) $($found.Unprobed[0].Device)" 'unknown adapter kept for the end'
     function Get-SerialPorts { New-Port 'COM3' 0x2341 0x0043; New-Port 'COM9' 0x303A 0x4001 }
     Assert-Throws { Find-Ports } 'hold BOOT'
 }
@@ -226,9 +227,25 @@ Test 'every board is flashed in turn, once even when plugged in by two cables' {
     $ports = @((New-Port 'COM5' 0x10C4 0xEA60), (New-Port 'COM7' 0x303A 0x1001), (New-Port 'COM8' 0x1A86 0x7523),
         (New-Port 'COM3' 0x2341 0x0043))
     $chips = @{ COM7 = 'aa:00:00:00:00:01'; COM5 = 'aa:00:00:00:00:01'; COM8 = 'aa:00:00:00:00:02' }
-    $run = Invoke-MainOn '1.25.0' -Ports $ports -Chips $chips
+    $run = Invoke-MainOn '1.25.0' @('close') -Ports $ports -Chips $chips
     Assert-Equal 'COM7 COM8' (@($run.Flashed | ForEach-Object { $_[0] }) -join ' ') 'flashed ports'
     if (-not ($said -match 'same board as COM7')) { throw 'duplicate not reported' }
+    Assert-Equal 'close' $run.Defaults[0] 'closing choice preselected'
+}
+
+Test 'an unknown adapter is probed only when picked at the end' {
+    $path = Store $BaseBuild
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
+    $ports = @((New-Port 'COM5' 0x10C4 0xEA60), (New-Port 'COM3' 0x2341 0x0043), (New-Port 'COM4' 0x2E8A 0x000A))
+    $chips = @{ COM5 = 'aa:00:00:00:00:01'; COM4 = 'aa:00:00:00:00:02' }
+    $run = Invoke-MainOn '' @('close') -Ports $ports -Chips $chips
+    Assert-Equal 'COM5' (@($run.Flashed | ForEach-Object { $_[0] }) -join ' ') 'closed at once'
+    Assert-Equal 'True' $run.Closed 'no second wait'
+    $run = Invoke-MainOn '' @('COM3', 'COM4') -Ports $ports -Chips $chips
+    Assert-Equal 'COM5 COM4' (@($run.Flashed | ForEach-Object { $_[0] }) -join ' ') 'both tried'
+    Assert-Equal 'False' $run.Closed 'nothing left to offer'
+    $run = Invoke-MainOn '' @('COM4', 'close') -Ports @($ports[1], $ports[2]) -Chips $chips
+    Assert-Equal 'COM4' (@($run.Flashed | ForEach-Object { $_[0] }) -join ' ') 'only unknown adapters'
 }
 
 Test 'a failed board does not stop the others' {

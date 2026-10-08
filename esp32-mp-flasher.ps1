@@ -676,7 +676,8 @@ function Get-PortRank($Port) {
     2
 }
 
-# flashable ports in probing order, with notes on the ones skipped
+# flashable ports in probing order, notes on the ones skipped, and the unknown adapters,
+# which are offered at the end instead of being probed
 function Find-Ports {
     Write-Step wait 'port' 'looking for boards' -Live
     $ports = @(Get-SerialPorts)
@@ -686,30 +687,40 @@ function Find-Ports {
     }
 
     $usable = @()
+    $unprobed = @()
     $skipped = @()
     $cdc = $false
     foreach ($p in $ports) {
         $label, $flashable = Get-PortClass $p
+        $entry = [pscustomobject]@{ Device = $p.Device; Hint = "$label  $(Format-PortIds $p)"; Rank = Get-PortRank $p
+            Number = [int]($p.Device -replace '\D', '') }
         if ($flashable) {
-            $usable += [pscustomobject]@{ Device = $p.Device; Hint = "$label  $(Format-PortIds $p)"; Rank = Get-PortRank $p
-                Number = [int]($p.Device -replace '\D', '') }
-        } else {
-            $skipped += "$($p.Device) skipped: $label"
-            if ((Format-PortIds $p) -eq '303a:4001') { $cdc = $true }
+            $usable += $entry
+            continue
+        }
+        $skipped += "$($p.Device) skipped: $label"
+        $ids = Format-PortIds $p
+        if ($ids -eq '303a:4001') { $cdc = $true }
+        elseif (-not $KnownDevices[$ids]) {
+            $entry.Hint = "unknown adapter  $ids"
+            $unprobed += $entry
         }
     }
 
     if (-not $usable) {
-        Write-Step fail 'port' 'no flashable port'
+        Write-Step fail 'port' 'no ESP32 adapter'
         Write-Note ($skipped -join "`n")
         if ($cdc) {
             Fail ("no port that can be flashed`n" +
                 "this board exposes only its firmware serial port`n" +
                 'hold BOOT, tap RESET, release BOOT and run again')
         }
-        Fail 'no ESP32 board among the serial ports, plug one in'
     }
-    [pscustomobject]@{ Ports = @($usable | Sort-Object Rank, Number); Skipped = $skipped }
+    [pscustomobject]@{
+        Ports    = @($usable | Sort-Object Rank, Number)
+        Unprobed = @($unprobed | Sort-Object Number)
+        Skipped  = $skipped
+    }
 }
 
 function Get-PortSnapshot {
@@ -1004,16 +1015,16 @@ function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase)
     Fail 'flashing failed at every baud rate, esptool said:' $r.Output
 }
 
-# every board on the ports, once each: a board plugged in by two cables answers with the same MAC
-function Find-Boards {
-    $found = Find-Ports
+# every board on the ports, once each: a board plugged in by two cables answers with the same MAC.
+# a lone port that does not answer stops the run, unless -Optional
+function Find-Boards([object[]]$Ports, [string[]]$Skipped = @(), [switch]$Optional) {
     $boards = @()
     $seen = @{}
-    for ($i = 0; $i -lt $found.Ports.Count; $i++) {
-        $port = $found.Ports[$i].Device
+    for ($i = 0; $i -lt $Ports.Count; $i++) {
+        $port = $Ports[$i].Device
         if ($i) { Write-Ui }
-        Write-Step ok 'port' $port -Detail $found.Ports[$i].Hint
-        if ($i -eq 0 -and $found.Skipped) { Write-Note ($found.Skipped -join "`n") }
+        Write-Step ok 'port' $port -Detail $Ports[$i].Hint
+        if ($i -eq 0 -and $Skipped) { Write-Note ($Skipped -join "`n") }
 
         Write-Step wait 'repl' 'listening' -Live
         $banner = Read-Banner $port
@@ -1025,7 +1036,7 @@ function Find-Boards {
         }
         Start-Sleep -Milliseconds 500
 
-        $chip = Get-Chip $port -Optional:($found.Ports.Count -gt 1)
+        $chip = Get-Chip $port -Optional:($Optional -or $Ports.Count -gt 1)
         if (-not $chip) { continue }
         if ($chip.Mac -and $seen.ContainsKey($chip.Mac)) {
             Write-Note "same board as $($seen[$chip.Mac]), already listed"
@@ -1038,9 +1049,6 @@ function Find-Boards {
             Banner  = $banner
             Version = $(if ($current) { $current.Version } else { '' })
         }
-    }
-    if (-not $boards) {
-        Fail "no ESP32 answered on $(@($found.Ports | ForEach-Object { $_.Device }) -join ', '), esptool said:" $ChipOutput
     }
     $boards
 }
@@ -1145,31 +1153,63 @@ function Write-Summary($Results) {
     }
 }
 
+# a failure is shown and counted, and the next board goes on; with -Alone it ends the run instead
+function Update-Boards($Targets, $Catalog, [switch]$Alone) {
+    foreach ($target in $Targets) {
+        try {
+            Update-Board $target $Catalog
+        } catch {
+            if ($Alone) { throw }
+            Write-Failure $_
+            $script:BoardFailures++
+            [pscustomobject]@{ Port = $target.Port; Chip = $target.Chip.Name; From = $target.Version; To = ''; Outcome = 'failed' }
+        }
+    }
+}
+
+# the closing choice when unknown adapters were passed over: close, or try one of them
+function Select-Unprobed($Ports) {
+    $items = @('close') + @($Ports | ForEach-Object { $_.Device })
+    $hints = @('') + @($Ports | ForEach-Object { $_.Hint })
+    $keys = @('c') + @(1..$Ports.Count | ForEach-Object { if ($_ -le 9) { "$_" } else { '' } })
+    $index = Select-Item $items 'try a port that was not probed?' $hints 0 $keys -Escape 0 -Always
+    if ($index -le 0) { return $null }
+    $Ports[$index - 1]
+}
+
 function Main {
     $env:COLUMNS = '200'
     $env:NO_COLOR = '1'
     $env:TERM = 'dumb'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $script:BoardFailures = 0
+    $script:Closed = $false
 
     Write-Title
     Initialize-Input | Out-Null
     Initialize-Esptool
-    $targets = @(Find-Boards)
+    $found = Find-Ports
+    $left = @($found.Unprobed)
+    $targets = @(Find-Boards $found.Ports $found.Skipped -Optional:($left.Count -gt 0))
+    if (-not $targets -and $found.Ports -and -not $left) {
+        Fail "no ESP32 answered on $(@($found.Ports | ForEach-Object { $_.Device }) -join ', '), esptool said:" $ChipOutput
+    }
 
     $catalog = @{}
-    $results = @()
-    $script:BoardFailures = 0
-    foreach ($target in $targets) {
-        try {
-            $results += Update-Board $target $catalog
-        } catch {
-            if ($targets.Count -eq 1) { throw }
-            Write-Failure $_
-            $script:BoardFailures++
-            $results += [pscustomobject]@{ Port = $target.Port; Chip = $target.Chip.Name; From = $target.Version; To = ''; Outcome = 'failed' }
-        }
-    }
+    $results = @(Update-Boards $targets $catalog -Alone:($targets.Count -eq 1 -and -not $left))
     if ($targets.Count -gt 1) { Write-Summary $results }
+
+    while ($left) {
+        $pick = Select-Unprobed $left
+        if (-not $pick) {
+            $script:Closed = $true
+            return
+        }
+        $left = @($left | Where-Object { $_ -ne $pick })
+        Write-Ui
+        $more = @(Find-Boards @($pick) -Optional)
+        Update-Boards $more $catalog | Out-Null
+    }
 }
 
 
@@ -1187,7 +1227,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     } finally {
         if ($Interactive) { [Console]::CursorVisible = $true }
     }
-    if (-not [Console]::IsInputRedirected) {
+    if (-not [Console]::IsInputRedirected -and -not $Closed) {
         Write-Ui
         Write-Line @('  ', 'Gray', 'press any key to close', 'DarkGray')
         [void][Console]::ReadKey($true)
