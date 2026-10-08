@@ -12,10 +12,15 @@ Download the zip from the
 [latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest),
 unpack it and double-click `micropython-esp-flasher.cmd`. Works on Windows 10 and 11.
 
-For each board it finds, it picks the matching build and counts down 5 seconds:
+For each board it finds, it picks the build the hardware needs and counts down
+5 seconds:
 
-- no MicroPython or an older version: flashes it, keeping the files on the board;
-- already the latest: leaves it alone.
+- no MicroPython, an older version, or the wrong build for the board (say, the
+  base build on a module with octal PSRAM): flashes it;
+- already the latest, right build: leaves it alone.
+
+Files on the board are kept. When the new build would keep them elsewhere, they
+are copied to the `backups` folder first, and put back once it runs.
 
 Press any key or click during the countdown for a menu: `flash`,
 `erase + flash` (wipes the files too), `other build`, `skip`. Arrows, mouse or

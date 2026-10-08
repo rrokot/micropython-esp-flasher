@@ -133,22 +133,31 @@ function New-Port([string]$Device, [int]$VendorId, [int]$ProductId) {
     [pscustomobject]@{ Device = $Device; VendorId = $VendorId; ProductId = $ProductId }
 }
 
-# runs Main against boards whose REPL reports $Running (empty: no MicroPython); $Chips maps each port
-# with a chip behind it to that chip's MAC. returns the flash calls and the preselected menu rows
+# runs Main against ESP32-S3 boards running MicroPython $Running (empty: none) as build $Build, with
+# $PsramMb of embedded PSRAM; $Chips maps each port with a chip behind it to that chip's MAC, and
+# the new image keeps its files at $NewFs. returns the flash calls, the preselected menu rows and
+# the file copies made around them
 function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports = @(New-Port 'COM5' 0x10C4 0xEA60),
-        [hashtable]$Chips = @{ COM5 = 'aa:00:00:00:00:01' }, [string]$FailOn = '', [switch]$Interrupt) {
+        [hashtable]$Chips = @{ COM5 = 'aa:00:00:00:00:01' }, [string]$FailOn = '', [switch]$Interrupt,
+        [string]$Build = 'ESP32_GENERIC_S3', [int]$PsramMb = 0, [long]$NewFs = 0x200000, [long]$FirmwarePsram = 0) {
     $flashed = New-Object System.Collections.Generic.List[object]
     $menus = New-Object System.Collections.Generic.List[string]
-    $banner = if ($Running) { "MicroPython v$Running on 2026-01-01; Generic ESP32S3 module with ESP32S3`r`n>>> " } else { '' }
+    $copies = New-Object System.Collections.Generic.List[string]
     function Initialize-Esptool {}
     function Get-SerialPorts { $Ports }
-    function Read-Banner { $banner }
+    function Read-Board {
+        if ($Running) { [pscustomobject]@{ Version = $Running; Machine = 'Generic'; Build = $Build; Psram = $FirmwarePsram; Fs = 0x200000 } }
+    }
     function Get-Chip([string]$Port, [switch]$Optional) {
         if ($Chips.ContainsKey($Port)) {
-            return [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB'; Mac = $Chips[$Port] }
+            return [pscustomobject]@{ Name = 'ESP32-S3'; Type = 'ESP32-S3 (QFN56) (revision v0.2)'; Features = 'Wi-Fi'
+                Psram = [bool]$PsramMb; PsramMb = $PsramMb; FlashSize = '8MB'; Mac = $Chips[$Port] }
         }
         if (-not $Optional) { throw "no chip on $Port" }
     }
+    function Get-FsStart { $NewFs }
+    function Save-BoardFiles($Port, $Folder) { $copies.Add("save $Port"); @([pscustomobject]@{ Dir = $false; Size = 10; Path = '/main.py' }) }
+    function Restore-BoardFiles($Port, $Folder, $Files) { $copies.Add("restore $Port") }
     function Wait-Countdown { [bool]$Interrupt }
     function Select-Item([string[]]$Items, $Title, $Hints, [int]$Default) {
         if ($Items.Count -eq 1) { return 0 }
@@ -162,10 +171,11 @@ function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports
     function Save-Url { throw 'network request' }
     function Invoke-Flash($Port, $Chip, $Path, $Erase) {
         if ($Port -eq $FailOn) { Fail "write failed on $Port" }
+        $copies.Add("flash $Port")
         $flashed.Add(@($Port, $Chip, $Path, $Erase)); 115200
     }
     Main
-    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus; Failures = $BoardFailures; Closed = $Closed }
+    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus; Failures = $BoardFailures; Closed = $Closed; Copies = $copies }
 }
 
 Test 'offline main can flash when only octal variant is cached' {
@@ -198,6 +208,48 @@ Test 'an up to date or newer board is skipped unless the countdown is interrupte
     Assert-Equal 0 $run.Flashed.Count 'skip chosen'
     $run = Invoke-MainOn '1.26.1' @('flash 1.26.1') -Interrupt
     Assert-Equal 1 $run.Flashed.Count 'flash on request'
+}
+
+Test 'a wrong build is replaced by the one the hardware needs' {
+    $basePath = Store $BaseBuild
+    $octalPath = Store $Octal
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">x</a><a href=`"/resources/firmware/$Octal`">x</a>" }
+    $run = Invoke-MainOn '1.26.1' -PsramMb 8
+    Assert-Equal $octalPath $run.Flashed[0][2] 'octal PSRAM running the base build'
+    $run = Invoke-MainOn '1.26.1' -Build 'ESP32_GENERIC_S3-SPIRAM_OCT'
+    Assert-Equal $basePath $run.Flashed[0][2] 'no PSRAM running the octal build'
+    $run = Invoke-MainOn '1.26.1' -PsramMb 2
+    Assert-Equal 0 $run.Flashed.Count 'quad PSRAM on the base build is right'
+    $run = Invoke-MainOn '1.26.1' -Build 'ESP32_GENERIC_S3-SPIRAM_OCT' -FirmwarePsram 8MB
+    Assert-Equal 0 $run.Flashed.Count 'PSRAM the firmware found counts, though esptool saw none'
+    $run = Invoke-MainOn '1.26.1' -Build 'UM_TINYS3'
+    Assert-Equal 0 $run.Flashed.Count 'a board build that is not ours names no variant to judge'
+}
+
+Test 'files are copied off and put back only when the new build keeps them elsewhere' {
+    Store $BaseBuild | Out-Null
+    Store $Octal | Out-Null
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">x</a><a href=`"/resources/firmware/$Octal`">x</a>" }
+    $run = Invoke-MainOn '1.25.0'
+    Assert-Equal 'flash COM5' ($run.Copies -join ', ') 'same place, no copy'
+    $run = Invoke-MainOn '1.25.0' -NewFs 0x300000
+    Assert-Equal 'save COM5, flash COM5, restore COM5' ($run.Copies -join ', ') 'moved: copied off, flashed, put back'
+    $run = Invoke-MainOn '' -NewFs 0x300000
+    Assert-Equal 'flash COM5' ($run.Copies -join ', ') 'no MicroPython, no files'
+    $run = Invoke-MainOn '1.25.0' @('erase + flash', 'yes, erase everything') -Interrupt -NewFs 0x300000
+    Assert-Equal 'flash COM5' ($run.Copies -join ', ') 'erase + flash wipes them on purpose'
+}
+
+Test 'whether the files move is told by the filesystem start, or the variant without a table' {
+    $running = [pscustomobject]@{ Fs = 0x200000 }
+    function Get-FsStart { 0x200000 }
+    Assert-Equal 'False' (Test-FilesMove 'ESP32-S3' 'x.bin' $running '' 'SPIRAM_OCT') 'same start, other variant'
+    function Get-FsStart { 0x310000 }
+    Assert-Equal 'True' (Test-FilesMove 'ESP32' 'x.bin' $running 'OTA' 'OTA') 'other start'
+    function Get-FsStart { $null }
+    Assert-Equal 'False' (Test-FilesMove 'ESP8266' 'x.bin' $running 'FLASH_1M' 'FLASH_1M') 'esp8266, same variant'
+    Assert-Equal 'True' (Test-FilesMove 'ESP8266' 'x.bin' $running 'FLASH_1M' '') 'esp8266, other variant'
+    Assert-Equal 'True' (Test-FilesMove 'ESP8266' 'x.bin' $running $null '') 'esp8266 naming no variant'
 }
 
 Test 'ports are probed download mode first, then jtag, then bridges; unknown adapters are not' {
@@ -276,16 +328,23 @@ function New-FlashId([string]$Family, [string]$Type, [string]$Features, [string]
         "MAC:                $Mac", '', 'Flash Memory Information:', "Detected flash size: $Size") -join "`n"
 }
 
-# a firmware image as an ESP32 build lays it out: bootloader at the start, partition table at 0x8000 - offset
-function New-Image([string]$Name, [int]$Offset, [switch]$NoTable) {
+# a firmware image as an ESP32 build lays it out: bootloader at the start, partition table at
+# 0x8000 - offset with a factory app ending at 0x200000, and a vfs partition after it with -Vfs
+function New-Image([string]$Name, [int]$Offset, [switch]$NoTable, [int]$Vfs = 0) {
     $bytes = New-Object byte[] 0x9000
     for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = 0xFF }
     $bytes[0] = 0xE9
-    if (-not $NoTable) {
-        $at = 0x8000 - $Offset
-        $bytes[$at] = 0xAA; $bytes[$at + 1] = 0x50; $bytes[$at + 2] = 0; $bytes[$at + 3] = 0
-        [BitConverter]::GetBytes([uint32]0x10000).CopyTo($bytes, $at + 4)
-        [BitConverter]::GetBytes([uint32]0x1F0000).CopyTo($bytes, $at + 8)
+    $entries = @(, @(0, 0x10000, 0x1F0000, 'factory'))
+    if ($Vfs) { $entries += , @(1, $Vfs, 0x100000, 'vfs') }
+    $at = 0x8000 - $Offset
+    if ($NoTable) { $entries = @() }
+    foreach ($e in $entries) {
+        $bytes[$at] = 0xAA; $bytes[$at + 1] = 0x50; $bytes[$at + 2] = $e[0]; $bytes[$at + 3] = 0
+        [BitConverter]::GetBytes([uint32]$e[1]).CopyTo($bytes, $at + 4)
+        [BitConverter]::GetBytes([uint32]$e[2]).CopyTo($bytes, $at + 8)
+        $label = [System.Text.Encoding]::ASCII.GetBytes($e[3])
+        for ($i = 0; $i -lt 16; $i++) { $bytes[$at + 12 + $i] = if ($i -lt $label.Length) { $label[$i] } else { 0 } }
+        $at += 32
     }
     $path = Join-Path $Cache $Name
     [System.IO.File]::WriteAllBytes($path, $bytes)
@@ -365,27 +424,18 @@ Test 'the variant follows the hardware, whatever the chip' {
     Assert-Equal 'False' $s2.Psram 'no embedded psram is no psram'
 }
 
-Test 'a board running micropython keeps the variant it runs' {
-    $esp32 = New-Catalog 'ESP32_GENERIC' @('', 'D2WD', 'OTA', 'SPIRAM', 'UNICORE')
-    $s3 = New-Catalog 'ESP32_GENERIC_S3' @('', 'FLASH_4M', 'SPIRAM_OCT') @{ FLASH_4M = '1.25.0' }
-    $wrover = New-TestChip 'ESP32' 'ESP32-D0WD-V3 (revision v3.1)' 'Wi-Fi, BT, Dual Core + LP Core, 240MHz' '4MB'
-    $r8 = New-TestChip 'ESP32-S3' 'ESP32-S3 (QFN56) (revision v0.2)' 'Wi-Fi, Embedded PSRAM 8MB (AP_3v3)' '8MB'
-    $plain = New-TestChip 'ESP32-S3' 'ESP32-S3 (QFN56) (revision v0.2)' 'Wi-Fi' '4MB'
-    Assert-Equal 'SPIRAM' (Get-VariantGuess $esp32 $wrover 'SPIRAM') 'external psram, known only to the build it runs'
-    Assert-Equal '' (Get-VariantGuess $esp32 $wrover $null) 'nothing running: the hardware decides'
-    Assert-Equal '' (Get-VariantGuess $s3 $r8 '') 'the base build it runs'
-    Assert-Equal 'SPIRAM_OCT' (Get-VariantGuess $s3 $r8 $null) 'hardware alone'
-    Assert-Equal '' (Get-VariantGuess $s3 $plain 'FLASH_4M') 'a variant no longer built falls to the hardware'
-    Assert-Equal 'SPIRAM_OCT' (Get-VariantGuess $s3 $r8 'NOT_A_VARIANT') 'an unknown variant falls to the hardware'
-}
-
-Test 'esp8266 reports its flash size and banner' {
+Test 'esp8266 reports its flash size' {
     foreach ($size in '4MB', '512KB') {
         function Invoke-Esptool { [pscustomobject]@{ Code = 0; Seconds = 1; Output = (New-FlashId 'ESP8266' 'ESP8266EX' 'Wi-Fi, 160MHz' '5c:cf:7f:01:02:03' $size) } }
         Assert-Equal $size (Get-Chip 'COM5').FlashSize "flash size $size"
     }
-    $info = Get-BannerInfo "MicroPython v1.26.1 on 2025-09-11; ESP module with ESP8266`r`n>>> "
-    Assert-Equal '1.26.1|ESP module' "$($info.Version)|$($info.Machine)" 'banner'
+}
+
+Test 'the image tells where its filesystem starts' {
+    Assert-Equal 0x200000 (Get-FsStart 'ESP32-S3' (New-Image 'a.bin' 0)) 'right after the last partition'
+    Assert-Equal 0x200000 (Get-FsStart 'ESP32' (New-Image 'b.bin' 0x1000)) 'wherever the image starts'
+    Assert-Equal 0x400000 (Get-FsStart 'ESP32' (New-Image 'c.bin' 0x1000 -Vfs 0x400000)) 'a vfs partition of its own'
+    Assert-Equal $null (Get-FsStart 'ESP8266' (New-Image 'd.bin' 0 -NoTable)) 'esp8266 has no table'
 }
 
 Test 'the flash offset is read from the image itself' {
@@ -414,50 +464,150 @@ Test 'images are written where they belong, esp8266 with the flash size detected
     Assert-Equal 0 $calls.Count 'nothing erased when the image cannot be placed'
 }
 
-# a serial port whose board sends $Chunks, one per read, the banner once Ctrl-B arrives, and its
-# build name once asked for it
-function New-FakeSerial([string[]]$Chunks, [string]$Banner = '', [string]$Build = 'ESP32_GENERIC_S3') {
-    $state = @{ Reads = 0; CtrlB = $false; BannerSent = $false; Asked = $false; BuildSent = $false
-        Sent = New-Object System.Collections.Generic.List[byte] }
-    $serial = [pscustomobject]@{ State = $state; Chunks = $Chunks; Banner = $Banner; Build = $Build }
-    $serial | Add-Member ScriptMethod Write {
-        param($Bytes, $Offset, $Count)
-        if ($Bytes -is [string]) { $this.State.Asked = $Bytes -match '_build'; return }
-        $this.State.Sent.AddRange([byte[]]$Bytes)
-        if ($Bytes -contains 2) { $this.State.CtrlB = $true }
+function ConvertTo-Hex([string]$Text) {
+    -join ([System.Text.Encoding]::UTF8.GetBytes($Text) | ForEach-Object { '{0:x2}' -f $_ })
+}
+
+function ConvertFrom-Hex([string]$Hex) {
+    $bytes = [byte[]]@(for ($i = 0; $i -lt $Hex.Length; $i += 2) { [Convert]::ToByte($Hex.Substring($i, 2), 16) })
+    [System.Text.Encoding]::UTF8.GetString($bytes)
+}
+
+# a board behind a serial port. it is still booting through $Boot, a chunk per read, and only
+# then answers Ctrl-C with a prompt; -Silent never does. in the raw REPL it runs the flasher's
+# code by what that code asks for, over a filesystem of path -> bytes in $Files
+function New-FakeBoard([string[]]$Boot = @(), [hashtable]$Files = @{}, [switch]$Silent, [int]$FailAt = 0, [switch]$NoPaste,
+        [string]$Probe = "version=1.29.0`r`nmachine=Generic ESP32S3 module with ESP32S3`r`nbuild=ESP32_GENERIC_S3`r`npsram=0`r`nfs=2097152`r`n") {
+    $state = @{ Boot = [System.Collections.Queue]::new([object[]]$Boot); Out = ''; Raw = $false; Code = ''; Open = $null
+        Sent = New-Object System.Collections.Generic.List[byte]; Files = $Files; Closed = $false; Execs = 0; FailAt = $FailAt
+        Paste = $false; Ask = 0; Taken = 0 }
+    $board = [pscustomobject]@{ State = $state; Probe = $Probe; Silent = [bool]$Silent; NoPaste = [bool]$NoPaste }
+    $board | Add-Member ScriptMethod Close { $this.State.Closed = $true }
+    $board | Add-Member ScriptProperty BytesToRead { $this.State.Out.Length }
+    $board | Add-Member ScriptMethod ReadByte {
+        $b = [int]$this.State.Out[0]
+        $this.State.Out = $this.State.Out.Substring(1)
+        $b
     }
-    $serial | Add-Member ScriptMethod ReadExisting {
-        if ($this.State.CtrlB -and -not $this.State.BannerSent) { $this.State.BannerSent = $true; return $this.Banner }
-        if ($this.State.Asked -and -not $this.State.BuildSent) {
-            $this.State.BuildSent = $true
-            return "import sys;print('build:'+getattr(sys.implementation,'_build',''))`r`nbuild:$($this.Build)`r`n>>> "
+    # what running code sends back: its output, Ctrl-D, its error, Ctrl-D, the raw prompt
+    $board | Add-Member ScriptMethod Answer {
+        $s = $this.State
+        $s.Execs++
+        # -FailAt: that piece of code is cut short, as by a stray Ctrl-C after a reset
+        if ($s.Execs -eq $s.FailAt) { return [string][char]4 + 'KeyboardInterrupt: ' + [char]4 + '>' }
+        $this.Run($s.Code) + [char]4 + [char]4 + '>'
+    }
+    $board | Add-Member ScriptMethod Write {
+        param($Data, $Offset, $Count)
+        [byte[]]$bytes = if ($Data -is [string]) { [System.Text.Encoding]::UTF8.GetBytes($Data) } else { $Data[$Offset..($Offset + $Count - 1)] }
+        $s = $this.State
+        $s.Sent.AddRange($bytes)
+        if ($this.Silent) { return }
+        $banner = "MicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with ESP32S3`r`n>>> "
+        foreach ($b in $bytes) {
+            if (-not $s.Raw) {
+                if ($s.Boot.Count) { continue }
+                if ($b -eq 3) { $s.Out += "`r`n>>> " }
+                elseif ($b -eq 2) { $s.Out += $banner }
+                elseif ($b -eq 1) { $s.Raw = $true; $s.Out += "raw REPL; CTRL-B to exit`r`n>" }
+            } elseif ($s.Paste) {
+                # raw-paste: a window of 32 bytes, granted again with Ctrl-A as each is taken in
+                if ($b -eq 4) { $s.Out += [string][char]4 + $this.Answer(); $s.Paste = $false; $s.Code = ''; continue }
+                $s.Code += [char]$b
+                if (++$s.Taken % 32 -eq 0) { $s.Out += [char]1 }
+            } elseif ($s.Ask -eq 0 -and $b -eq 5) { $s.Ask = 1 }
+            elseif ($s.Ask -eq 1 -and $b -eq 65) { $s.Ask = 2 }
+            elseif ($s.Ask -eq 2 -and $b -eq 1) {
+                $s.Ask = 0
+                if ($this.NoPaste) { $s.Out += 'R' + [char]0; continue }
+                $s.Paste = $true; $s.Taken = 0; $s.Code = ''
+                $s.Out += 'R' + [char]1 + [char]32 + [char]0
+            } elseif ($b -eq 4) {
+                $s.Out += 'OK' + $this.Answer()
+                $s.Code = ''
+            } elseif ($b -eq 2) { $s.Raw = $false; $s.Out += $banner }
+            elseif ($b -gt 4) { $s.Code += [char]$b }
         }
-        $i = $this.State.Reads++
-        if ($i -lt $this.Chunks.Count) { $this.Chunks[$i] } else { '' }
     }
-    $serial
+    $board | Add-Member ScriptMethod ReadExisting {
+        if ($this.State.Boot.Count) { return $this.State.Boot.Dequeue() }
+        $out = $this.State.Out
+        $this.State.Out = ''
+        $out
+    }
+    $board | Add-Member ScriptMethod Run {
+        param([string]$Code)
+        $s = $this.State
+        $path = if ($Code -match "unhexlify\('([0-9a-f]+)'\)") { ConvertFrom-Hex $Matches[1] }
+        if ($Code -match 'idf_heap_info') { return $this.Probe }
+        if ($Code -match 'ilistdir') {
+            $dirs = @($s.Files.Keys | ForEach-Object { $p = $_; while (($p = $p -replace '/[^/]*$', '') ) { $p } } | Sort-Object -Unique)
+            $lines = @($dirs | ForEach-Object { "d 0 $(ConvertTo-Hex $_)" }) +
+                @($s.Files.Keys | Sort-Object | ForEach-Object { "f $($s.Files[$_].Length) $(ConvertTo-Hex $_)" })
+            return ($lines -join "`r`n") + "`r`n"
+        }
+        if ($Code -match 'b2a_base64') {
+            $data = [byte[]]$s.Files[$path]
+            $out = ''
+            for ($i = 0; $i -lt $data.Length; $i += 512) {
+                $out += [Convert]::ToBase64String($data, $i, [math]::Min(512, $data.Length - $i)) + "`r`n"
+            }
+            return $out
+        }
+        if ($Code -match "open\(.*'wb'\)") { $s.Open = $path; $s.Files[$path] = [byte[]]@(); return '' }
+        if ($Code -match "a2b_base64\('([^']*)'\)") { $s.Files[$s.Open] = [byte[]]($s.Files[$s.Open] + [Convert]::FromBase64String($Matches[1])); return '' }
+        ''
+    }
+    $board
 }
 
 Test 'the repl is reached even when opening the port reset the board' {
     function Start-Sleep {}
-    $banner = "`r`nMicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with ESP32-S3`r`nType `"help()`" for more information.`r`n>>> "
-    $reset = New-FakeSerial @("ESP-ROM:esp32s3-20210327`r`nrst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)`r`n",
-        "boot-WARNING - Boot start: reset_cause=1`r`n", '',
-        "Traceback (most recent call last):`r`n  File `"boot.py`", line 549, in <module>`r`nKeyboardInterrupt: `r`n$banner") $banner
-    $info = Get-BannerInfo (Invoke-ReplHandshake $reset)
-    Assert-Equal '1.29.0|Generic ESP32S3 module|ESP32_GENERIC_S3' "$($info.Version)|$($info.Machine)|$($info.Build)" 'after a reset and a busy boot.py'
-    Assert-Equal 4 $reset.State.Sent[-1] 'soft reset last, so the stopped code runs again'
+    $board = New-FakeBoard @("ESP-ROM:esp32s3-20210327`r`nrst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)`r`n",
+        "boot-WARNING - Boot start: reset_cause=1`r`n", '')
+    Assert-Equal 'True' (Connect-Repl $board) 'prompt after the boot'
+    $facts = ConvertFrom-Probe (Invoke-Repl $board $BoardProbe)
+    Assert-Equal '1.29.0|ESP32_GENERIC_S3|Generic ESP32S3 module' "$($facts.Version)|$($facts.Build)|$($facts.Machine)" 'probe'
+    Disconnect-Repl $board
+    Assert-Equal '2 4' "$($board.State.Sent[-2]) $($board.State.Sent[-1])" 'leaves the raw REPL and soft resets, so its code runs again'
 
-    $raw = New-FakeSerial @("raw REPL; CTRL-B to exit`r`n>") $banner 'ESP32_GENERIC_S3-SPIRAM_OCT'
-    $info = Get-BannerInfo (Invoke-ReplHandshake $raw)
-    Assert-Equal '1.29.0|ESP32_GENERIC_S3-SPIRAM_OCT' "$($info.Version)|$($info.Build)" 'left in raw REPL'
-    $old = New-FakeSerial @("`r`n>>> ") "`r`nMicroPython v1.22.0 on 2023-12-27; Generic ESP32 module with ESP32`r`n>>> " ''
-    Assert-Equal '1.22.0|' "$((Get-BannerInfo (Invoke-ReplHandshake $old)).Version)|$((Get-BannerInfo (Invoke-ReplHandshake $old)).Build)" 'no build name before 1.24'
+    $raw = New-FakeBoard
+    $raw.State.Raw = $true
+    Assert-Equal 'True' (Connect-Repl $raw) 'a board left in the raw REPL'
 
-    $other = New-FakeSerial @('sensor 21.5C', "`r`nsensor 21.6C`r`n", 'sensor 21.6C') $banner
-    $text = Invoke-ReplHandshake $other -Patience 200
-    if (Get-BannerInfo $text) { throw 'other firmware taken for MicroPython' }
-    if ($other.State.CtrlB -or $other.State.Sent -contains 4) { throw 'Ctrl-B or Ctrl-D sent without a prompt' }
+    $old = New-FakeBoard -NoPaste
+    Connect-Repl $old | Out-Null
+    Assert-Equal '1.29.0' (ConvertFrom-Probe (Invoke-Repl $old $BoardProbe)).Version 'a board without raw-paste mode'
+
+    $other = New-FakeBoard -Silent
+    Assert-Equal 'False' (Connect-Repl $other 200) 'other firmware never shows a prompt'
+}
+
+Test 'what the board says of itself is read' {
+    $facts = ConvertFrom-Probe "version=1.30.0-preview.12.gabc`r`nmachine=Generic ESP32 module with SPIRAM with ESP32`r`nbuild=ESP32_GENERIC-SPIRAM`r`npsram=4194304`r`nfs=2097152`r`n"
+    Assert-Equal '1.30.0-preview.12.gabc|Generic ESP32 module with SPIRAM|ESP32_GENERIC-SPIRAM|4194304|2097152' `
+        "$($facts.Version)|$($facts.Machine)|$($facts.Build)|$($facts.Psram)|$($facts.Fs)" 'esp32'
+    $facts = ConvertFrom-Probe "version=1.22.0`r`nmachine=ESP module with ESP8266`r`nbuild=`r`nfs=1048576`r`n"
+    Assert-Equal '1.22.0|ESP module||0|1048576' "$($facts.Version)|$($facts.Machine)|$($facts.Build)|$($facts.Psram)|$($facts.Fs)" 'esp8266 before 1.24'
+}
+
+Test 'files go off the board and back unchanged' {
+    function Start-Sleep {}
+    $blob = [byte[]](0..255) * 12
+    $files = @{ '/boot.py' = [System.Text.Encoding]::UTF8.GetBytes("import app`r`n"); '/lib/app.mpy' = $blob
+        ('/data/n' + [char]0x00E4 + 'me 1.txt') = [System.Text.Encoding]::UTF8.GetBytes('x') }
+    $old = New-FakeBoard -Files $files -FailAt 3
+    $new = New-FakeBoard -FailAt 6
+    $script:boards = [System.Collections.Queue]::new(@($old, $new))
+    function Open-SerialPort { $script:boards.Dequeue() }
+    $folder = Join-Path $Cache 'backup'
+    $saved = @(Save-BoardFiles 'COM5' $folder)
+    Assert-Equal 3 @($saved | Where-Object { -not $_.Dir }).Count 'files listed'
+    Assert-Equal ($blob.Length) (Get-Item -LiteralPath (Join-Path $folder 'lib\app.mpy')).Length 'binary copied whole'
+    Restore-BoardFiles 'COM5' $folder $saved
+    foreach ($path in $files.Keys) {
+        Assert-Equal ([Convert]::ToBase64String($files[$path])) ([Convert]::ToBase64String([byte[]]$new.State.Files[$path])) "$path back unchanged"
+    }
 }
 
 Test 'a run is logged in full, and old logs are pruned' {
@@ -494,15 +644,6 @@ Test 'esptool progress lines are parsed' {
     if ($summary -notmatch '^1\.5 MB in 11\.3 s') { throw "summary: $summary" }
 }
 
-Test 'repl banner is split into version and board' {
-    $info = Get-BannerInfo "x`r`nMicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3`r`n>>> "
-    Assert-Equal '1.29.0' $info.Version 'version'
-    Assert-Equal 'Generic ESP32S3 module with Octal-SPIRAM' $info.Machine 'machine'
-    $info = Get-BannerInfo 'MicroPython v1.22.0-preview.5.g1234 on 2023-10-01; ESP32 module with ESP32'
-    Assert-Equal '1.22.0-preview.5.g1234' $info.Version 'preview version'
-    Assert-Equal 'ESP32 module' $info.Machine 'short machine'
-    if (Get-BannerInfo 'esp32s3' ) { throw 'not a banner' }
-}
 Test 'progress bar fills in proportion' {
     $parts = Get-BarParts 0.5 0 20
     Assert-Equal 10 $parts[0].Length 'half filled'

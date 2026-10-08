@@ -69,6 +69,7 @@ $Inv = [System.Globalization.CultureInfo]::InvariantCulture
 $LiveOpen = $false
 
 $LogDir = Join-Path $PSScriptRoot 'logs'
+$BackupDir = Join-Path $PSScriptRoot 'backups'
 $LogKeep = 30
 $LogPath = $null
 $LogMuted = $false
@@ -698,11 +699,9 @@ function Test-PartitionEntry([byte[]]$Bytes, [int]$At) {
         [BitConverter]::ToUInt32($Bytes, $At + 4) % 0x1000 -eq 0 -and [BitConverter]::ToUInt32($Bytes, $At + 8) -gt 0
 }
 
-# an ESP32 image holds the flash from the bootloader on, and the partition table always sits at
-# 0x8000, so where the table lies in the file tells where the file goes. ESP8266 boots from 0
-function Get-FlashOffset([string]$Chip, [string]$Path) {
-    if ($Chip -eq 'ESP8266') { return 0 }
-    $bytes = New-Object byte[] 0x8020
+# the start of an image, far enough to hold its partition table wherever the image begins
+function Read-ImageHead([string]$Path) {
+    $bytes = New-Object byte[] 0x9000
     $stream = [System.IO.File]::OpenRead($Path)
     try {
         $read = 0
@@ -714,15 +713,37 @@ function Get-FlashOffset([string]$Chip, [string]$Path) {
     } finally {
         $stream.Dispose()
     }
+    [byte[]]$bytes[0..([math]::Max(0, $read - 1))]
+}
+
+# an ESP32 image holds the flash from the bootloader on, and the partition table always sits at
+# 0x8000, so where the table lies in the file tells where the file goes. ESP8266 boots from 0
+function Get-FlashOffset([string]$Chip, [string]$Path) {
+    if ($Chip -eq 'ESP8266') { return 0 }
+    $bytes = Read-ImageHead $Path
     $found = @(for ($offset = 0; $offset -lt 0x8000; $offset += 0x1000) {
             $at = 0x8000 - $offset
-            if ($at + 32 -le $read -and (Test-PartitionEntry $bytes $at)) { $offset }
+            if ($at + 32 -le $bytes.Length -and (Test-PartitionEntry $bytes $at)) { $offset }
         })
     if ($found.Count -ne 1) {
         Fail ("cannot tell where $(Split-Path -Leaf $Path) goes in flash`n" +
             'it has no partition table where an ESP32 image keeps one; delete it and download it again')
     }
     $found[0]
+}
+
+# where the image's MicroPython keeps its files: the vfs partition when the table has one, else
+# right after the last partition, to the end of the flash. $null for ESP8266, which has no table
+function Get-FsStart([string]$Chip, [string]$Path) {
+    if ($Chip -eq 'ESP8266') { return $null }
+    $bytes = Read-ImageHead $Path
+    $end = 0
+    for ($at = 0x8000 - (Get-FlashOffset $Chip $Path); $at + 32 -le $bytes.Length -and (Test-PartitionEntry $bytes $at); $at += 32) {
+        $start = [BitConverter]::ToUInt32($bytes, $at + 4)
+        if ([System.Text.Encoding]::ASCII.GetString($bytes, $at + 12, 16).TrimEnd([char]0) -eq 'vfs') { return [long]$start }
+        $end = [math]::Max($end, [long]$start + [BitConverter]::ToUInt32($bytes, $at + 8))
+    }
+    $end
 }
 
 function ConvertTo-SerialPort([string]$Name, [string]$DeviceId) {
@@ -837,64 +858,288 @@ function Wait-Board([string[]]$Before, [string]$Previous, [int]$Timeout = 20) {
     $Previous
 }
 
-# Ctrl-C until a prompt shows: a board that did reset, or is busy in boot.py or main.py, gets
-# there within a few seconds, other firmware never does. then Ctrl-B, which leaves the raw REPL
-# if a tool left it there, and prints the banner: version, board and chip. then the build the
-# board names itself, as in ESP32_GENERIC_S3-SPIRAM_OCT, empty before MicroPython 1.24. last,
-# Ctrl-D soft resets, so the code Ctrl-C stopped runs again rather than idling at the prompt
-function Invoke-ReplHandshake($Serial, [int]$Patience = 3000) {
-    $text = ''
-    $prompt = $false
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $prompt -and $watch.ElapsedMilliseconds -lt $Patience) {
-        $Serial.Write([byte[]](3, 3), 0, 2)
-        Start-Sleep -Milliseconds 250
-        $text += $Serial.ReadExisting()
-        $prompt = $text -match '>>>\s*$' -or $text -match 'raw REPL; CTRL-B to exit'
-    }
-    if (-not $prompt) { return $text }
-    $Serial.Write([byte[]](2), 0, 1)
-    $watch.Restart()
-    while ($text -notmatch 'MicroPython v[^\r\n]*\r?\n[\s\S]*>>>\s*$' -and $watch.ElapsedMilliseconds -lt 1000) {
-        Start-Sleep -Milliseconds 50
-        $text += $Serial.ReadExisting()
-    }
-    $Serial.Write("import sys;print('build:'+getattr(sys.implementation,'_build',''))`r")
-    $watch.Restart()
-    while ($text -notmatch 'build:[\w-]*\r?\n' -and $watch.ElapsedMilliseconds -lt 1000) {
-        Start-Sleep -Milliseconds 50
-        $text += $Serial.ReadExisting()
-    }
-    $Serial.Write([byte[]](4), 0, 1)
-    $text
+
+# ---------------------------------------------------------------------- repl
+
+function Open-SerialPort([string]$Port) {
+    # a bridge drives EN and IO0 from RTS and DTR. the driver still pulses them when the port
+    # opens, so the board may reset, and Connect-Repl waits for it; kept low, as mpremote does,
+    # they at least do not reset it again on close. Espressif's own USB needs DTR up for
+    # TinyUSB CDC to talk, and has no such circuit
+    $device = @(Get-SerialPorts | Where-Object { $_.Device -eq $Port }) | Select-Object -First 1
+    $native = -not $device -or $device.VendorId -eq 0x303A
+    $serial = New-Object System.IO.Ports.SerialPort $Port, 115200
+    $serial.ReadTimeout = 400
+    $serial.WriteTimeout = 2000
+    $serial.Encoding = [System.Text.Encoding]::UTF8
+    $serial.DtrEnable = $native
+    $serial.RtsEnable = $native
+    $serial.Open()
+    $serial
 }
 
-function Read-Banner([string]$Port) {
-    try {
-        # a bridge drives EN and IO0 from RTS and DTR. the driver still pulses them when the port
-        # opens, so the board may reset, and the handshake waits for it; kept low, as mpremote
-        # does, they at least do not reset it again on close. Espressif's own USB needs DTR up
-        # for TinyUSB CDC to talk, and has no such circuit
-        $device = @(Get-SerialPorts | Where-Object { $_.Device -eq $Port }) | Select-Object -First 1
-        $native = -not $device -or $device.VendorId -eq 0x303A
-        $serial = New-Object System.IO.Ports.SerialPort $Port, 115200
-        $serial.ReadTimeout = 400
-        $serial.WriteTimeout = 400
-        $serial.Encoding = [System.Text.Encoding]::UTF8
-        $serial.DtrEnable = $native
-        $serial.RtsEnable = $native
-        $serial.Open()
+# Ctrl-C and Ctrl-B until a prompt shows: a board that did reset, or is busy in boot.py or
+# main.py, gets there within a few seconds, one a tool left in the raw REPL leaves it on Ctrl-B,
+# other firmware never answers. then Ctrl-A, the raw REPL, where code runs without echo and its
+# output comes back intact. false when no MicroPython answered
+function Connect-Repl($Serial, [int]$Patience = 3000) {
+    $text = ''
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($text -notmatch '>>>\s*$' -and $watch.ElapsedMilliseconds -lt $Patience) {
+        $Serial.Write([byte[]](3, 3, 2), 0, 3)
+        Start-Sleep -Milliseconds 250
+        $text += $Serial.ReadExisting()
+    }
+    if ($text -notmatch '>>>\s*$') {
+        Write-Log "repl: no prompt, the board sent:`n$(if ($text) { $text } else { '(nothing)' })"
+        return $false
+    }
+    $Serial.Write([byte[]](1), 0, 1)
+    # the raw prompt, then quiet: whatever a board still had to say after a reset is let out
+    $text = ''
+    $quiet = [System.Diagnostics.Stopwatch]::StartNew()
+    $watch.Restart()
+    while (($text -notmatch 'raw REPL; CTRL-B to exit\r?\n>$' -or $quiet.ElapsedMilliseconds -lt 200) -and
+        $watch.ElapsedMilliseconds -lt 2000) {
+        Start-Sleep -Milliseconds 20
+        $more = $Serial.ReadExisting()
+        if ($more) { $text += $more; $quiet.Restart() }
+    }
+    $true
+}
+
+# one byte from the board, or -1 when none came within $Patience ms
+function Read-ReplByte($Serial, [int]$Patience) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $Serial.BytesToRead) {
+        if ($watch.ElapsedMilliseconds -ge $Patience) { return -1 }
+        Start-Sleep -Milliseconds 1
+    }
+    $Serial.ReadByte()
+}
+
+# runs code in the raw REPL and returns what it printed; what it raised becomes the failure.
+# the code goes in raw-paste mode, as mpremote sends it: the board names a window and grants
+# each one again once it has taken it in, so nothing arrives it has no room for. a board older
+# than MicroPython 1.14 says no, and gets the code in pieces with pauses, as pyboard.py did
+function Invoke-Repl($Serial, [string]$Code, [int]$Patience = 5000) {
+    # anything still unread belongs to before this code, and would hide its answer
+    [void]$Serial.ReadExisting()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Code)
+    $Serial.Write([byte[]](5, 65, 1), 0, 3)
+    if ((Read-ReplByte $Serial 1000) -eq 82 -and (Read-ReplByte $Serial 1000) -eq 1) {
+        $window = (Read-ReplByte $Serial 1000) + 256 * (Read-ReplByte $Serial 1000)
+        $room = $window
+        for ($i = 0; $i -lt $bytes.Length; $i += $sent) {
+            while ($room -eq 0 -or $Serial.BytesToRead) {
+                $answer = Read-ReplByte $Serial $Patience
+                if ($answer -eq 1) { $room += $window }
+                else { $Serial.Write([byte[]](4), 0, 1); Fail 'the board stopped taking the code' "answered $answer" }
+            }
+            $sent = [math]::Min($room, $bytes.Length - $i)
+            $Serial.Write($bytes, $i, $sent)
+            $room -= $sent
+        }
+        $Serial.Write([byte[]](4), 0, 1)
+        # the board acknowledges the end with Ctrl-D, late window grants aside, then runs it
+        do { $answer = Read-ReplByte $Serial $Patience } while ($answer -eq 1)
+        if ($answer -ne 4) { Fail 'the board did not take the code' "answered $answer" }
+        $reply = 'OK'
+    } else {
+        Start-Sleep -Milliseconds 200
+        [void]$Serial.ReadExisting()
+        for ($i = 0; $i -lt $bytes.Length; $i += 256) {
+            $Serial.Write($bytes, $i, [math]::Min(256, $bytes.Length - $i))
+            Start-Sleep -Milliseconds 10
+        }
+        $Serial.Write([byte[]](4), 0, 1)
+        $reply = ''
+    }
+    # "OK" in plain raw mode, the output, Ctrl-D, the error, Ctrl-D, ">"; the wait restarts while
+    # data flows
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($reply -notmatch "^OK[\s\S]*\x04[\s\S]*\x04" -and $watch.ElapsedMilliseconds -lt $Patience) {
+        Start-Sleep -Milliseconds 20
+        $more = $Serial.ReadExisting()
+        if ($more) { $reply += $more; $watch.Restart() }
+    }
+    $m = [regex]::Match($reply, "^OK([\s\S]*?)\x04([\s\S]*?)\x04")
+    if (-not $m.Success) { Fail 'the board stopped answering' $reply }
+    if ($m.Groups[2].Value.Trim()) { Fail 'the board raised an error' $m.Groups[2].Value }
+    $m.Groups[1].Value
+}
+
+# a board that resets or takes a stray Ctrl-C right after booting loses the code it was given:
+# $Body runs again, on a fresh prompt, up to three times
+function Invoke-Patiently($Serial, [string]$What, [scriptblock]$Body) {
+    for ($try = 1; ; $try++) {
         try {
-            $text = Invoke-ReplHandshake $serial
-            Write-Log ("repl on $Port ($(if ($native) { 'DTR/RTS up' } else { 'DTR/RTS low' })) replied:`n" +
-                $(if ($text) { $text } else { '(nothing)' }))
-            $text
+            return & $Body
+        } catch {
+            if ($try -ge 3) { throw }
+            Write-Log "$What failed, trying again: $($_.Exception.Message)`n$([string]$_.Exception.Data['details'])"
+            if (-not (Connect-Repl $Serial 10000)) { Fail "the board stopped answering during $What" }
+        }
+    }
+}
+
+# Ctrl-B leaves the raw REPL, Ctrl-D soft resets, so the code Ctrl-C stopped runs again
+function Disconnect-Repl($Serial) {
+    try { $Serial.Write([byte[]](2, 4), 0, 2); Start-Sleep -Milliseconds 100 } finally { $Serial.Close() }
+}
+
+# what a board running MicroPython tells of itself: the version, the build it names (as in
+# ESP32_GENERIC_S3-SPIRAM_OCT, since 1.24), the PSRAM it found (the one heap region of a
+# megabyte or more; external PSRAM esptool cannot see), and where its filesystem starts
+$BoardProbe = @'
+import os, sys
+u = os.uname()
+print('version=' + u.version.split()[0][1:])
+print('machine=' + u.machine)
+print('build=' + getattr(sys.implementation, '_build', ''))
+try:
+    import esp32
+    big = max(r[0] for r in esp32.idf_heap_info(esp32.HEAP_DATA))
+    print('psram=%d' % (big if big >= 1 << 20 else 0))
+    print('fs=%d' % esp32.Partition.find(esp32.Partition.TYPE_DATA, label='vfs')[0].info()[2])
+except ImportError:
+    import flashbdev
+    print('fs=%d' % (flashbdev.bdev.start_sec * 4096))
+'@
+
+function ConvertFrom-Probe([string]$Text) {
+    $facts = @{}
+    foreach ($m in [regex]::Matches($Text, '(?m)^(\w+)=(.*?)\r?$')) { $facts[$m.Groups[1].Value] = $m.Groups[2].Value }
+    [pscustomobject]@{
+        Version = [string]$facts['version']
+        Machine = [string]$facts['machine'] -replace ' with ESP\S*$', ''
+        Build   = [string]$facts['build']
+        Psram   = $(if ($facts['psram']) { [long]$facts['psram'] } else { 0 })
+        Fs      = $(if ($facts['fs']) { [long]$facts['fs'] } else { $null })
+    }
+}
+
+# the board's own account of itself, or $null when no MicroPython answers
+function Read-Board([string]$Port, [int]$Patience = 3000) {
+    try {
+        $serial = Open-SerialPort $Port
+        try {
+            if (-not (Connect-Repl $serial $Patience)) { return $null }
+            $reply = Invoke-Repl $serial $BoardProbe
+            Write-Log "board on ${Port}:`n$reply"
+            ConvertFrom-Probe $reply
         } finally {
-            $serial.Close()
+            Disconnect-Repl $serial
         }
     } catch {
-        Write-Log "repl on ${Port}: $($_.Exception.Message)"
-        ''
+        Write-Log "board on ${Port}: $($_.Exception.Message)`n$([string]$_.Exception.Data['details'])"
+        $null
+    }
+}
+
+# every file on the board: kind, size, path; paths travel as hex, so any name survives
+$ListFiles = @'
+import os, binascii
+def walk(d):
+    for e in os.ilistdir(d):
+        p = d.rstrip('/') + '/' + e[0]
+        if e[1] == 0x4000:
+            print('d 0', binascii.hexlify(p.encode()).decode())
+            walk(p)
+        else:
+            print('f', os.stat(p)[6], binascii.hexlify(p.encode()).decode())
+walk('/')
+'@
+
+function Get-BoardFiles($Serial) {
+    foreach ($line in (Invoke-Repl $Serial $ListFiles 20000) -split "`r?`n") {
+        $kind, $size, $hex = $line.Trim() -split ' ', 3
+        if (-not $hex) { continue }
+        $bytes = [byte[]]@(for ($i = 0; $i -lt $hex.Length; $i += 2) { [Convert]::ToByte($hex.Substring($i, 2), 16) })
+        [pscustomobject]@{
+            Dir = $kind -eq 'd'; Size = [long]$size; Path = [System.Text.Encoding]::UTF8.GetString($bytes); Hex = $hex
+        }
+    }
+}
+
+# copies every file off the board into $Folder and returns the list of what it holds
+function Save-BoardFiles([string]$Port, [string]$Folder) {
+    $serial = Open-SerialPort $Port
+    try {
+        if (-not (Connect-Repl $serial)) { Fail "no MicroPython prompt on $Port to copy the files from" }
+        $files = @(Invoke-Patiently $serial 'listing the files' { Get-BoardFiles $serial })
+        $total = ($files | Measure-Object Size -Sum).Sum
+        $done = 0
+        $frame = 0
+        foreach ($file in $files) {
+            $local = Join-Path $Folder ($file.Path.TrimStart('/') -replace '/', '\')
+            if ($file.Dir) { New-Item -ItemType Directory -Force -Path $local | Out-Null; continue }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $local) | Out-Null
+            $code = "import binascii`nwith open(binascii.unhexlify('$($file.Hex)').decode(), 'rb') as f:`n" +
+                "    while True:`n        b = f.read(512)`n        if not b:`n            break`n" +
+                "        print(binascii.b2a_base64(b).decode().strip())`n"
+            $text = Invoke-Patiently $serial "copying $($file.Path)" { Invoke-Repl $serial $code (10000 + $file.Size / 5) }
+            $data = [System.IO.MemoryStream]::new()
+            foreach ($chunk in $text -split "`r?`n" | Where-Object { $_ }) {
+                $part = [Convert]::FromBase64String($chunk.Trim())
+                $data.Write($part, 0, $part.Length)
+            }
+            if ($data.Length -ne $file.Size) { Fail "copying $($file.Path) gave $($data.Length) of $($file.Size) bytes" }
+            [System.IO.File]::WriteAllBytes($local, $data.ToArray())
+            $done += $file.Size
+            Write-Activity 'files' "$(Format-Size $done) of $(Format-Size $total)" $frame ($done / [math]::Max(1, $total)) -Bar
+            $frame++
+        }
+        Write-Log "copied off ${Port}:`n$(@($files | ForEach-Object { "$($_.Size) $($_.Path)" }) -join "`n")"
+        $files
+    } finally {
+        Disconnect-Repl $serial
+    }
+}
+
+# writes $Files back from $Folder, then lists the board again to check every one arrived whole
+function Restore-BoardFiles([string]$Port, [string]$Folder, $Files) {
+    $serial = Open-SerialPort $Port
+    try {
+        # a fresh filesystem is formatted on the first boot, which takes a moment longer
+        if (-not (Connect-Repl $serial 10000)) { Fail "no MicroPython prompt on $Port to put the files back" }
+        $total = ($Files | Measure-Object Size -Sum).Sum
+        $done = 0
+        foreach ($file in $Files) {
+            $name = "binascii.unhexlify('$($file.Hex)').decode()"
+            if ($file.Dir) {
+                Invoke-Patiently $serial "making $($file.Path)" {
+                    Invoke-Repl $serial "import os, binascii`ntry:`n    os.mkdir($name)`nexcept OSError:`n    pass`n"
+                } | Out-Null
+                continue
+            }
+            $bytes = [System.IO.File]::ReadAllBytes((Join-Path $Folder ($file.Path.TrimStart('/') -replace '/', '\')))
+            # writing flash stalls the chip long enough for its UART to drop what arrives meanwhile,
+            # so the data gathers in memory while it is sent, and goes to the file every five
+            # pieces, 7.5KB, in code of its own that runs while nothing is sent. a retry starts over
+            $pieces = [math]::Ceiling($bytes.Length / 1536)
+            Invoke-Patiently $serial "writing $($file.Path)" {
+                Invoke-Repl $serial "import binascii`nf = open($name, 'wb')`nb = bytearray()`n" | Out-Null
+                for ($k = 0; $k -lt $pieces; $k++) {
+                    $chunk = [Convert]::ToBase64String($bytes, $k * 1536, [math]::Min(1536, $bytes.Length - $k * 1536))
+                    Invoke-Repl $serial "b.extend(binascii.a2b_base64('$chunk'))`n" | Out-Null
+                    if ($k % 5 -eq 4 -or $k -eq $pieces - 1) { Invoke-Repl $serial "f.write(b)`nb = bytearray()`n" | Out-Null }
+                    $sent = $done + [math]::Min(($k + 1) * 1536, $bytes.Length)
+                    Write-Activity 'files' "$(Format-Size $sent) of $(Format-Size $total)" $k ($sent / [math]::Max(1, $total)) -Bar
+                }
+                Invoke-Repl $serial "f.close()`n" | Out-Null
+            }
+            $done += $bytes.Length
+        }
+        $now = @(Invoke-Patiently $serial 'listing the files' { Get-BoardFiles $serial })
+        foreach ($file in $Files) {
+            $back = $now | Where-Object { $_.Path -eq $file.Path } | Select-Object -First 1
+            if (-not $back -or (-not $file.Dir -and $back.Size -ne $file.Size)) {
+                Fail "$($file.Path) did not come back whole; the copy is in $Folder"
+            }
+        }
+    } finally {
+        Disconnect-Repl $serial
     }
 }
 
@@ -1011,17 +1256,29 @@ function Get-HardwareNames($Chip) {
         @(if ($Chip.Psram) { 'SPIRAM' }) + @(if ($Chip.PsramMb -ge 8) { 'SPIRAM_OCT' })
 }
 
-# the build for a board: the variant it runs, when it runs MicroPython and names it (see
-# Invoke-ReplHandshake); otherwise the variant its hardware names, the longest when it names
-# several, the base build when it names none. variants the site no longer builds for its latest
-# release are out; cached builds all count, being what was downloaded
-function Get-VariantGuess($Builds, $Chip, $Running = $null) {
+# the build the hardware needs: the variant it names, the longest when it names several, the
+# base build when it names none. variants the site no longer builds for its latest release are
+# out; cached builds all count, being what was downloaded
+function Get-VariantGuess($Builds, $Chip) {
     $latest = ($Builds.Values | Sort-Object Key | Select-Object -Last 1).Version
-    $available = @($Builds.Keys | Where-Object { -not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest })
-    if ($null -ne $Running -and $available -contains $Running) { return $Running }
     $names = Get-HardwareNames $Chip
-    $fits = @($available | Where-Object { $_ -and $names -contains $_ } | Sort-Object Length -Descending)
+    $fits = @($Builds.Keys | Where-Object {
+            $_ -and $names -contains $_ -and (-not $Builds[$_].Listed -or $Builds[$_].Version -eq $latest)
+        } | Sort-Object Length -Descending)
     if ($fits) { $fits[0] } else { '' }
+}
+
+function Format-Variant([string]$Variant) {
+    if ($Variant) { $Variant } else { 'base' }
+}
+
+# whether flashing moves the files: the new firmware's filesystem starts elsewhere than the one
+# on the board. an ESP8266 image has no table to read, so there a change of variant moves them,
+# and when nothing tells, they are taken to move: the cost of being wrong is only a copy
+function Test-FilesMove([string]$Chip, [string]$Path, $Running, $RunningVariant, [string]$Variant) {
+    $new = Get-FsStart $Chip $Path
+    if ($null -ne $new -and $null -ne $Running.Fs) { return $new -ne $Running.Fs }
+    $null -eq $RunningVariant -or $RunningVariant -ne $Variant
 }
 
 function Select-Variant($Builds, [string]$Current = '', [string]$Guess = '') {
@@ -1070,20 +1327,25 @@ function Get-VersionChange([string]$Current, [string]$Target) {
     'downgrade', 'Yellow'
 }
 
-# install and update happen on their own; up to date and downgrade wait for a choice
+# install, update and a wrong build happen on their own; up to date and downgrade wait for a choice
 function Test-FlashNeeded([string]$Change) {
-    $Change -eq 'install' -or $Change -eq 'update'
+    $Change -eq 'install' -or $Change -eq 'update' -or $Change -eq 'wrong build'
 }
 
-# draws the card and returns the version change it shows
-function Write-Plan([string]$Port, [string]$Board, [string]$Variant, $Build, [string]$Current, [string]$Chip) {
+# draws the card and returns the change it shows; $Running is the variant the board runs, when
+# it names one, and a variant other than the one its hardware needs is a wrong build
+function Write-Plan([string]$Port, [string]$Board, [string]$Variant, $Build, [string]$Current, $Running, [string]$Chip) {
     $change, $color = Get-VersionChange $Current $Build.Version
+    $wrong = $null -ne $Running -and $Running -ne $Variant
+    if ($wrong -and $change -eq 'up to date') { $change, $color = 'wrong build', 'Yellow' }
     $cached = Test-Path -LiteralPath (Join-Path $Cache $Build.Name) -PathType Leaf
     $version = if ($change -eq 'up to date') {
         @($Current, 'White', '     ', 'Gray', $change, $color)
     } else {
-        @($(if ($Current) { $Current } else { 'no MicroPython' }), $(if ($Current) { 'Gray' } else { 'DarkGray' }),
-            "  $($G.Arrow)  ", 'DarkGray', $Build.Version, 'White', '     ', 'Gray', $change, $color)
+        $from = if (-not $Current) { 'no MicroPython' } elseif ($wrong) { "$Current $(Format-Variant $Running)" } else { $Current }
+        $to = if ($wrong) { "$($Build.Version) $(Format-Variant $Variant)" } else { $Build.Version }
+        @($from, $(if ($Current) { 'Gray' } else { 'DarkGray' }), "  $($G.Arrow)  ", 'DarkGray', $to, 'White',
+            '     ', 'Gray', $change, $color)
     }
     Write-Ui
     Write-Card ("$Port $($G.Mid) $Board" + $(if ($Variant) { "-$Variant" })) @(
@@ -1132,17 +1394,6 @@ function Format-Written([string]$Output) {
     [string]::Format($Inv, '{0} in {1:0.0} s', (Format-Size ([double]$m.Groups[1].Value)), [double]$m.Groups[2].Value)
 }
 
-# "MicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3",
-# then "build:ESP32_GENERIC_S3-SPIRAM_OCT" from the handshake's question
-function Get-BannerInfo([string]$Banner) {
-    $m = [regex]::Match($Banner, 'MicroPython v(\S+)(?: on [^;\r\n]*;\s*([^\r\n]*?)(?: with ESP(?:32|8266)\S*)?)?\s*(?:\r|\n|$)')
-    if (-not $m.Success) { return $null }
-    [pscustomobject]@{
-        Version = $m.Groups[1].Value
-        Machine = $m.Groups[2].Value.Trim()
-        Build   = [regex]::Match($Banner, 'build:([\w-]*)\r?\n').Groups[1].Value
-    }
-}
 
 function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase) {
     $chipArg = ConvertTo-ChipArg $Chip
@@ -1180,9 +1431,9 @@ function Find-Boards([object[]]$Ports, [string[]]$Skipped = @(), [switch]$Option
         if ($i -eq 0 -and $Skipped) { Write-Note ($Skipped -join "`n") }
 
         Write-Step wait 'repl' 'listening' -Live
-        $current = Get-BannerInfo (Read-Banner $port)
-        if ($current) {
-            Write-Step ok 'repl' "MicroPython $($current.Version)" -Detail $current.Machine
+        $running = Read-Board $port
+        if ($running) {
+            Write-Step ok 'repl' "MicroPython $($running.Version)" -Detail $running.Machine
         } else {
             Write-Step skip 'repl' 'no MicroPython answer' DarkGray
         }
@@ -1195,12 +1446,12 @@ function Find-Boards([object[]]$Ports, [string[]]$Skipped = @(), [switch]$Option
             continue
         }
         if ($chip.Mac) { $seen[$chip.Mac] = $port }
-        $boards += [pscustomobject]@{
-            Port    = $port
-            Chip    = $chip
-            Version = $(if ($current) { $current.Version } else { '' })
-            Build   = $(if ($current) { $current.Build } else { '' })
+        # PSRAM outside the chip is invisible to esptool; firmware that found it says so
+        if ($running -and $running.Psram) {
+            $chip.Psram = $true
+            $chip.PsramMb = [math]::Max($chip.PsramMb, [int]($running.Psram / 1MB))
         }
+        $boards += [pscustomobject]@{ Port = $port; Chip = $chip; Running = $running }
     }
     $boards
 }
@@ -1209,7 +1460,8 @@ function Find-Boards([object[]]$Ports, [string[]]$Skipped = @(), [switch]$Option
 function Update-Board($Target, $Catalog) {
     $port = $Target.Port
     $chip = $Target.Chip
-    $result = [pscustomobject]@{ Port = $port; Chip = $chip.Name; From = $Target.Version; To = ''; Outcome = 'failed' }
+    $version = if ($Target.Running) { $Target.Running.Version } else { '' }
+    $result = [pscustomobject]@{ Port = $port; Chip = $chip.Name; From = $version; To = ''; Outcome = 'failed' }
     $board = ConvertTo-BoardName $chip.Name
 
     if (-not $Catalog.ContainsKey($board)) {
@@ -1218,10 +1470,13 @@ function Update-Board($Target, $Catalog) {
     }
     $builds = $Catalog[$board]
     # the variant it runs, when the build it names is this board's: ESP32_GENERIC_S3-SPIRAM_OCT
-    $running = if ($Target.Build -match "^$([regex]::Escape($board))(?:-(.+))?$") { [string]$Matches[1] } else { $null }
-    $guess = Get-VariantGuess $builds $chip $running
+    $running = $null
+    if ($Target.Running -and $Target.Running.Build -match "^$([regex]::Escape($board))(?:-(.+))?$") {
+        $running = [string]$Matches[1]
+    }
+    $guess = Get-VariantGuess $builds $chip
     Write-Log ("$port $($chip.Type): $($chip.Features); flash $($chip.FlashSize), PSRAM $($chip.Psram) " +
-        "$($chip.PsramMb)MB, MAC $($chip.Mac), running $($Target.Version) '$($Target.Build)', variant guess '$guess'")
+        "$($chip.PsramMb)MB, MAC $($chip.Mac), running $version '$($Target.Running.Build)', needs '$guess'")
     $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
         Write-Note "the build $port needs is not available, pick one"
@@ -1232,7 +1487,8 @@ function Update-Board($Target, $Catalog) {
     while ($true) {
         $top = Get-Row
         $build = $builds[$variant]
-        $needed = Test-FlashNeeded (Write-Plan $port $board $variant $build $Target.Version $chip.Name)
+        $change = Write-Plan $port $board $variant $build $version $running $chip.Name
+        $needed = Test-FlashNeeded $change
         $action = if ($needed) { "flash $($build.Version)" } else { 'skip' }
         if ($auto -and -not (Wait-Countdown $action $Countdown)) {
             Clear-Live
@@ -1266,6 +1522,17 @@ function Update-Board($Target, $Catalog) {
     Write-Ui
 
     $path = Get-Firmware $build.Url $build.Name
+    # erase + flash wipes the files on purpose; otherwise, when the new build keeps them
+    # elsewhere, they are copied off first and put back once it runs
+    $backup = $null
+    if ($Target.Running -and $answer -ne 'e' -and (Test-FilesMove $chip.Name $path $Target.Running $running $variant)) {
+        $copy = "$($chip.Mac -replace ':', '-')\$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss', $Inv))"
+        $backup = Join-Path $BackupDir $copy
+        $files = @(Save-BoardFiles $port $backup)
+        $count = @($files | Where-Object { -not $_.Dir }).Count
+        $size = Format-Size ($files | Measure-Object Size -Sum).Sum
+        Write-Step ok 'files' "$count files, $size copied" -Detail "the new build keeps them elsewhere $($G.Mid) backups\$copy"
+    }
     $before = Get-PortSnapshot
     $baud = Invoke-Flash $port $chip.Name $path ($answer -eq 'e')
     Write-Step wait 'reboot' 'waiting for the board' -Live
@@ -1274,9 +1541,14 @@ function Update-Board($Target, $Catalog) {
     Write-Step ok 'reboot' "back on $port"
     $result.Outcome = 'flashed'
     $result.To = $build.Version
+    $result | Add-Member Done (@{ install = 'installed'; update = 'updated'; 'wrong build' = 'build fixed' }[$change])
+    if ($backup) {
+        Restore-BoardFiles $port $backup $files
+        Write-Step ok 'files' "$count files, $size put back" -Detail 'every size checked'
+    }
 
     Write-Step wait 'repl' 'listening' -Live
-    $running = Get-BannerInfo (Read-Banner $port)
+    $running = Read-Board $port
     if ($running) {
         Write-Step ok 'repl' "MicroPython $($running.Version)" -Detail $running.Machine
         Write-Ui
@@ -1295,10 +1567,11 @@ function Write-Summary($Results) {
     foreach ($r in $Results) {
         $label = $r.Port.PadRight(7) + $r.Chip.PadRight(10)
         if ($r.Outcome -eq 'flashed') {
+            $done = if ($r.Done) { $r.Done } else { 'flashed again' }
             if ($r.From) {
-                Write-Step ok $label "$($r.From)  $($G.Arrow)  $($r.To)" -Detail 'updated'
+                Write-Step ok $label "$($r.From)  $($G.Arrow)  $($r.To)" -Detail $done
             } else {
-                Write-Step ok $label $r.To -Detail 'installed'
+                Write-Step ok $label $r.To -Detail $done
             }
         } elseif ($r.Outcome -eq 'skipped') {
             Write-Step skip $label $(if ($r.From) { $r.From } else { 'no MicroPython' }) Gray -Detail 'left as it was'
