@@ -184,7 +184,7 @@ function Write-Activity([string]$Label, [string]$Text, [int]$Frame, [double]$Fra
 
 function Write-Title {
     Write-Ui
-    Write-Line @('  ', 'Gray', 'esp32-mp-flasher', 'Cyan', '   flash stable MicroPython onto ESP32', 'DarkGray')
+    Write-Line @('  ', 'Gray', 'micropython-esp-flasher', 'Cyan', '   flash stable MicroPython onto ESP32', 'DarkGray')
     Write-Line @('  ', 'Gray', ($G.H * [math]::Min((Get-Width) - 2, 60)), 'DarkGray')
     Write-Ui
 }
@@ -548,7 +548,7 @@ function Save-Url([string]$Url, [string]$Path, [string]$Label = '') {
     $request = [System.Net.HttpWebRequest]::Create($Url)
     $request.Timeout = 10000
     $request.ReadWriteTimeout = 10000
-    $request.UserAgent = 'esp32-mp-flasher'
+    $request.UserAgent = 'micropython-esp-flasher'
     $response = $request.GetResponse()
     try {
         $total = $response.ContentLength
@@ -1215,7 +1215,7 @@ function Main {
 
 if ($MyInvocation.InvocationName -ne '.') {
     $status = 0
-    try { $Host.UI.RawUI.WindowTitle = 'esp32-mp-flasher' } catch {}
+    try { $Host.UI.RawUI.WindowTitle = 'micropython-esp-flasher' } catch {}
     try {
         if ($Interactive) { [Console]::CursorVisible = $false }
         if ([Console]::IsInputRedirected) { Fail 'run this from a console' }

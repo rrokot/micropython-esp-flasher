@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot 'esp32-mp-flasher.ps1')
+. (Join-Path $PSScriptRoot 'micropython-esp-flasher.ps1')
 
 $Board = 'ESP32_GENERIC_S3'
 $BaseBuild = 'ESP32_GENERIC_S3-20250911-v1.26.1.bin'

@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot 'esp32-mp-flasher.ps1')
+. (Join-Path $PSScriptRoot 'micropython-esp-flasher.ps1')
 
 $Results = Join-Path $PSScriptRoot 'bench.txt'
 
@@ -22,7 +22,7 @@ function Get-NewestFirmware {
     if (Test-Path -LiteralPath $Cache -PathType Container) {
         $bins = @(Get-ChildItem -LiteralPath $Cache -Filter '*.bin' -File | Sort-Object LastWriteTime)
     }
-    if (-not $bins) { Fail 'no cached firmware, run esp32-mp-flasher once first' }
+    if (-not $bins) { Fail 'no cached firmware, run micropython-esp-flasher once first' }
     $bins[-1]
 }
 

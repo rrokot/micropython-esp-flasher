@@ -1,4 +1,4 @@
-# esp32-mp-flasher
+# micropython-esp-flasher
 
 Installs MicroPython on every connected ESP32 board, or updates it to the latest
 stable release. Nothing to configure or install: a Windows PowerShell script
@@ -9,8 +9,8 @@ plus Espressif's `esptool.exe`.
 ## Usage
 
 Download the zip from the
-[latest release](https://github.com/rrokot/esp32-mp-flasher/releases/latest),
-unpack it and double-click `esp32-mp-flasher.cmd`. Works on Windows 10 and 11.
+[latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest),
+unpack it and double-click `micropython-esp-flasher.cmd`. Works on Windows 10 and 11.
 
 For each board it finds, it picks the matching build and counts down 5 seconds:
 
@@ -34,6 +34,6 @@ whole folder.
 
 ## Development
 
-Tests: `powershell -ExecutionPolicy Bypass -File esp32-mp-flasher.Tests.ps1`.
+Tests: `powershell -ExecutionPolicy Bypass -File micropython-esp-flasher.Tests.ps1`.
 A clone has no `esptool.exe`; the first run downloads it. `bench.cmd` times
 flashing at several baud rates and erases the chip.
