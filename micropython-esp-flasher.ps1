@@ -832,30 +832,50 @@ function Wait-Board([string[]]$Before, [string]$Previous, [int]$Timeout = 20) {
     $Previous
 }
 
+# Ctrl-C until a prompt shows: a board that did reset, or is busy in boot.py or main.py, gets
+# there within a few seconds, other firmware never does. then Ctrl-B, which leaves the raw REPL
+# if a tool left it there, and prints the banner: version, board and chip. last, Ctrl-D soft
+# resets, so the code Ctrl-C stopped runs again rather than the board idling at the prompt
+function Invoke-ReplHandshake($Serial, [int]$Patience = 3000) {
+    $text = ''
+    $prompt = $false
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $prompt -and $watch.ElapsedMilliseconds -lt $Patience) {
+        $Serial.Write([byte[]](3, 3), 0, 2)
+        Start-Sleep -Milliseconds 250
+        $text += $Serial.ReadExisting()
+        $prompt = $text -match '>>>\s*$' -or $text -match 'raw REPL; CTRL-B to exit'
+    }
+    if (-not $prompt) { return $text }
+    $Serial.Write([byte[]](2), 0, 1)
+    $watch.Restart()
+    while ($text -notmatch 'MicroPython v[^\r\n]*\r?\n[\s\S]*>>>\s*$' -and $watch.ElapsedMilliseconds -lt 1000) {
+        Start-Sleep -Milliseconds 50
+        $text += $Serial.ReadExisting()
+    }
+    $Serial.Write([byte[]](4), 0, 1)
+    $text
+}
+
 function Read-Banner([string]$Port) {
     try {
+        # a bridge drives EN and IO0 from RTS and DTR. the driver still pulses them when the port
+        # opens, so the board may reset, and the handshake waits for it; kept low, as mpremote
+        # does, they at least do not reset it again on close. Espressif's own USB needs DTR up
+        # for TinyUSB CDC to talk, and has no such circuit
+        $device = @(Get-SerialPorts | Where-Object { $_.Device -eq $Port }) | Select-Object -First 1
+        $native = -not $device -or $device.VendorId -eq 0x303A
         $serial = New-Object System.IO.Ports.SerialPort $Port, 115200
         $serial.ReadTimeout = 400
         $serial.WriteTimeout = 400
         $serial.Encoding = [System.Text.Encoding]::UTF8
-        # asserted together, like pyserial: no reset on auto-reset circuits, and TinyUSB CDC sees a host
-        $serial.DtrEnable = $true
-        $serial.RtsEnable = $true
+        $serial.DtrEnable = $native
+        $serial.RtsEnable = $native
         $serial.Open()
         try {
-            $interrupt = [byte[]](3, 3, 2, 13, 10)
-            $serial.Write($interrupt, 0, $interrupt.Length)
-            Start-Sleep -Milliseconds 300
-            $serial.DiscardInBuffer()
-            $serial.Write("import os`rprint(os.uname().machine)`r")
-            Start-Sleep -Milliseconds 600
-            $text = $serial.ReadExisting()
-            $deadline = (Get-Date).AddMilliseconds(400)
-            while ((Get-Date) -lt $deadline) {
-                Start-Sleep -Milliseconds 50
-                $text += $serial.ReadExisting()
-            }
-            Write-Log "repl on ${Port} replied:`n$(if ($text) { $text } else { '(nothing)' })"
+            $text = Invoke-ReplHandshake $serial
+            Write-Log ("repl on $Port ($(if ($native) { 'DTR/RTS up' } else { 'DTR/RTS low' })) replied:`n" +
+                $(if ($text) { $text } else { '(nothing)' }))
             $text
         } finally {
             $serial.Close()

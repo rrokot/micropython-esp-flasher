@@ -388,6 +388,42 @@ Test 'images are written where they belong, esp8266 with the flash size detected
     Assert-Equal 0 $calls.Count 'nothing erased when the image cannot be placed'
 }
 
+# a serial port whose board sends $Chunks, one per read, and the banner once Ctrl-B arrives
+function New-FakeSerial([string[]]$Chunks, [string]$Banner = '') {
+    $state = @{ Reads = 0; CtrlB = $false; BannerSent = $false; Sent = New-Object System.Collections.Generic.List[byte] }
+    $serial = [pscustomobject]@{ State = $state; Chunks = $Chunks; Banner = $Banner }
+    $serial | Add-Member ScriptMethod Write {
+        param($Bytes, $Offset, $Count)
+        $this.State.Sent.AddRange([byte[]]$Bytes)
+        if ($Bytes -contains 2) { $this.State.CtrlB = $true }
+    }
+    $serial | Add-Member ScriptMethod ReadExisting {
+        if ($this.State.CtrlB -and -not $this.State.BannerSent) { $this.State.BannerSent = $true; return $this.Banner }
+        $i = $this.State.Reads++
+        if ($i -lt $this.Chunks.Count) { $this.Chunks[$i] } else { '' }
+    }
+    $serial
+}
+
+Test 'the repl is reached even when opening the port reset the board' {
+    function Start-Sleep {}
+    $banner = "`r`nMicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with ESP32-S3`r`nType `"help()`" for more information.`r`n>>> "
+    $reset = New-FakeSerial @("ESP-ROM:esp32s3-20210327`r`nrst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)`r`n",
+        "boot-WARNING - Boot start: reset_cause=1`r`n", '',
+        "Traceback (most recent call last):`r`n  File `"boot.py`", line 549, in <module>`r`nKeyboardInterrupt: `r`n$banner") $banner
+    $info = Get-BannerInfo (Invoke-ReplHandshake $reset)
+    Assert-Equal '1.29.0|Generic ESP32S3 module' "$($info.Version)|$($info.Machine)" 'after a reset and a busy boot.py'
+    Assert-Equal 4 $reset.State.Sent[-1] 'soft reset last, so the stopped code runs again'
+
+    $raw = New-FakeSerial @("raw REPL; CTRL-B to exit`r`n>") $banner
+    Assert-Equal '1.29.0' (Get-BannerInfo (Invoke-ReplHandshake $raw)).Version 'left in raw REPL'
+
+    $other = New-FakeSerial @('sensor 21.5C', "`r`nsensor 21.6C`r`n", 'sensor 21.6C') $banner
+    $text = Invoke-ReplHandshake $other -Patience 200
+    if (Get-BannerInfo $text) { throw 'other firmware taken for MicroPython' }
+    if ($other.State.CtrlB -or $other.State.Sent -contains 4) { throw 'Ctrl-B or Ctrl-D sent without a prompt' }
+}
+
 Test 'a run is logged in full, and old logs are pruned' {
     $LogDir = Join-Path $Cache 'logs'
     New-Item -ItemType Directory -Path $LogDir | Out-Null
