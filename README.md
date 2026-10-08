@@ -41,8 +41,6 @@ wipes the whole chip, including the filesystem, and asks again first.
 esptool works, a progress bar replaces its output; if it fails, the tail of
 that output is shown with the error.
 
-![After flashing, the board reboots and its REPL reports MicroPython 1.29.0](docs/done.svg)
-
 With more than one board plugged in, the same kind of list asks which one.
 
 ## How the variant is chosen
