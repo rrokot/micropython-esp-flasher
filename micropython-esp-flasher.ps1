@@ -164,7 +164,7 @@ function Write-Activity([string]$Label, [string]$Text, [int]$Frame, [double]$Fra
 
 function Write-Title {
     Write-Ui
-    Write-Line @('  ', 'Gray', 'micropython-esp-flasher', 'Cyan', '   installs and updates MicroPython on ESP boards', 'DarkGray')
+    Write-Line @('  ', 'Gray', 'micropython-esp-flasher', 'Cyan', '   MicroPython for ESP boards', 'DarkGray')
     Write-Line @('  ', 'Gray', ($G.H * [math]::Min((Get-Width) - 2, 60)), 'DarkGray')
     Write-Ui
 }
@@ -260,6 +260,13 @@ public static class EspFlasherInput {
         SetConsoleMode(GetStdHandle(-10), mode);
     }
 
+    // a key that means something on its own: Shift, Ctrl, Alt, Win and the locks are not, since
+    // Alt+Shift switches the layout and Alt+Tab or Win leave the window; ConsoleKey has none of them
+    static bool IsKeyPress(Record r) {
+        return r.Type == 1 && r.KeyDown != 0 && r.VirtualKey != 0x5B && r.VirtualKey != 0x5C &&
+            Enum.IsDefined(typeof(ConsoleKey), (int)r.VirtualKey);
+    }
+
     // kind (1 key, 2 move, 3 click, 4 wheel), virtual key, x, y, wheel delta
     public static int[] Read() {
         IntPtr input = GetStdHandle(-10);
@@ -269,7 +276,7 @@ public static class EspFlasherInput {
             if (!ReadConsoleInputW(input, records, 1, out read)) throw new Win32Exception();
             Record r = records[0];
             if (read == 0) continue;
-            if (r.Type == 1 && r.KeyDown != 0) return new int[] { 1, r.VirtualKey, 0, 0, 0 };
+            if (IsKeyPress(r)) return new int[] { 1, r.VirtualKey, 0, 0, 0 };
             if (r.Type != 2) continue;
             if (r.Flags == 1) return new int[] { 2, 0, r.X, r.Y, 0 };
             if (r.Flags == 0 && (r.Buttons & 1) != 0) return new int[] { 3, 0, r.X, r.Y, 0 };
@@ -285,7 +292,7 @@ public static class EspFlasherInput {
         while (GetNumberOfConsoleInputEvents(input, out count) && count > 0) {
             if (!ReadConsoleInputW(input, records, 1, out read) || read == 0) return false;
             Record r = records[0];
-            if (r.Type == 1 && r.KeyDown != 0) return true;
+            if (IsKeyPress(r)) return true;
             if (r.Type == 2 && r.Flags == 0 && (r.Buttons & 1) != 0) return true;
         }
         return false;
