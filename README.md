@@ -27,17 +27,21 @@ the first run downloads the latest one from
 [espressif/esptool releases](https://github.com/espressif/esptool/releases) into
 the `esptool` folder next to the script. To update esptool, delete that folder.
 
-It finds the board, identifies the chip, works out which build belongs on it
-and looks up the latest stable release on micropython.org. Then:
+It finds every board plugged in, identifies each chip, works out which build
+belongs on it and looks up the latest stable release on micropython.org. Then
+it takes the boards one after another, each with its plan and a 5-second
+countdown, as in the picture above:
 
 - **No MicroPython, or an older version** (a preview of the same release counts
-  as older): it shows the plan and flashes after a 5-second countdown, as in
-  the picture above. Any key or click during the countdown opens the menu
-  instead.
-- **Already the latest, or newer**: nothing is written. The menu opens with
-  `quit` selected, so Enter leaves the board as it is.
+  as older): the countdown ends in flashing.
+- **Already the latest, or newer**: the countdown ends in skipping the board;
+  nothing is written.
 
-The menu offers `flash`, `erase + flash`, `other build` and `quit`. It works
+Any key or click during a countdown opens the menu for that board instead.
+A board that fails does not stop the rest. With more than one board, a summary
+at the end lists what happened to each.
+
+The menu offers `flash`, `erase + flash`, `other build` and `skip`. It works
 with the arrows or the mouse wheel, by hovering and clicking, or by pressing
 the row's key; keys act on a single press and work on any keyboard layout.
 `flash`, which is also what the countdown runs, leaves the filesystem partition
@@ -47,12 +51,15 @@ wipes the whole chip, including the filesystem, and asks again first.
 esptool works, a progress bar replaces its output; if it fails, the tail of
 that output is shown with the error.
 
-The port is never asked for. With several flashable ports, for example a board
-plugged in through both its UART and its native USB connector, they are tried
-in order: a board held in download mode, then USB-UART bridges, then
-USB-Serial/JTAG, then adapters it does not recognise. A port where no ESP32
-answers is reported and the next one is tried. With two separate boards
-plugged in, unplug the one that should be left alone.
+Ports are never asked for. Every flashable port is probed, in order: a board
+held in download mode, then USB-Serial/JTAG, then USB-UART bridges, then
+adapters it does not recognise. A port where no ESP32 answers is noted and
+passed over. A board plugged in through both its UART and its native USB
+connector shows up on two ports; the chip's MAC address gives it away, and it
+is flashed once, through the port it answered on first. JTAG is probed before
+the bridges because probing through a bridge resets the chip, and with it the
+board's JTAG port, while probing through JTAG leaves the bridge alone. A board
+that should be left alone has to be unplugged, or skipped during its countdown.
 
 ## How the variant is chosen
 

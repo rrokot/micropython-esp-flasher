@@ -133,33 +133,39 @@ function New-Port([string]$Device, [int]$VendorId, [int]$ProductId) {
     [pscustomobject]@{ Device = $Device; VendorId = $VendorId; ProductId = $ProductId }
 }
 
-# runs Main against a board whose REPL reports $Running (empty: no MicroPython) and whose chip
-# answers on $Answering; returns the flash calls
+# runs Main against boards whose REPL reports $Running (empty: no MicroPython); $Chips maps each port
+# with a chip behind it to that chip's MAC. returns the flash calls and the preselected menu rows
 function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports = @(New-Port 'COM5' 0x10C4 0xEA60),
-        [string]$Answering = 'COM5') {
+        [hashtable]$Chips = @{ COM5 = 'aa:00:00:00:00:01' }, [string]$FailOn = '', [switch]$Interrupt) {
     $flashed = New-Object System.Collections.Generic.List[object]
     $menus = New-Object System.Collections.Generic.List[string]
     $banner = if ($Running) { "MicroPython v$Running on 2026-01-01; Generic ESP32S3 module with ESP32S3`r`n>>> " } else { '' }
     function Initialize-Esptool {}
     function Get-SerialPorts { $Ports }
     function Read-Banner { $banner }
-    function Get-Chip([string]$Port, [switch]$Next) {
-        if ($Port -eq $Answering) { return [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB' } }
-        if (-not $Next) { throw "no chip on $Port" }
+    function Get-Chip([string]$Port, [switch]$Optional) {
+        if ($Chips.ContainsKey($Port)) {
+            return [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB'; Mac = $Chips[$Port] }
+        }
+        if (-not $Optional) { throw "no chip on $Port" }
     }
+    function Wait-Countdown { [bool]$Interrupt }
     function Select-Item([string[]]$Items, $Title, $Hints, [int]$Default) {
         if ($Items.Count -eq 1) { return 0 }
         $menus.Add($Items[$Default])
         if ($menus.Count -gt $Menu.Count) { throw "unexpected menu: $($Items -join ', ')" }
         [array]::IndexOf($Items, $Menu[$menus.Count - 1])
     }
-    function Get-PortSnapshot { 'COM5' }
-    function Wait-Board { 'COM5' }
+    function Get-PortSnapshot { @($Ports | ForEach-Object { $_.Device }) }
+    function Wait-Board($Before, $Previous) { $Previous }
     function Start-Sleep {}
     function Save-Url { throw 'network request' }
-    function Invoke-Flash($Port, $Chip, $Path, $Erase) { $flashed.Add(@($Port, $Chip, $Path, $Erase)); 115200 }
+    function Invoke-Flash($Port, $Chip, $Path, $Erase) {
+        if ($Port -eq $FailOn) { Fail "write failed on $Port" }
+        $flashed.Add(@($Port, $Chip, $Path, $Erase)); 115200
+    }
     Main
-    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus }
+    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus; Failures = $BoardFailures }
 }
 
 Test 'offline main can flash when only octal variant is cached' {
@@ -180,19 +186,21 @@ Test 'a board without micropython or with an older one is flashed without asking
     }
 }
 
-Test 'an up to date or newer board is left alone until asked' {
+Test 'an up to date or newer board is skipped unless the countdown is interrupted' {
     Store $BaseBuild | Out-Null
     function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
     foreach ($running in '1.26.1', '1.27.0') {
-        $run = Invoke-MainOn $running @('quit')
+        $run = Invoke-MainOn $running
         Assert-Equal 0 $run.Flashed.Count "flash calls for $running"
-        Assert-Equal 'quit' $run.Defaults[0] "preselected action for $running"
     }
-    $run = Invoke-MainOn '1.26.1' @('flash 1.26.1')
+    $run = Invoke-MainOn '1.26.1' @('skip') -Interrupt
+    Assert-Equal 'skip' $run.Defaults[0] 'preselected action'
+    Assert-Equal 0 $run.Flashed.Count 'skip chosen'
+    $run = Invoke-MainOn '1.26.1' @('flash 1.26.1') -Interrupt
     Assert-Equal 1 $run.Flashed.Count 'flash on request'
 }
 
-Test 'ports are tried download mode first, then bridges, jtag, unknown adapters' {
+Test 'ports are probed download mode first, then jtag, bridges, unknown adapters' {
     function Get-SerialPorts {
         New-Port 'COM3' 0x2341 0x0043
         New-Port 'COM7' 0x303A 0x1001
@@ -201,19 +209,52 @@ Test 'ports are tried download mode first, then bridges, jtag, unknown adapters'
         New-Port 'COM9' 0x303A 0x4001
     }
     $found = Find-Ports
-    Assert-Equal 'COM5 COM12 COM7 COM3' (($found.Ports | ForEach-Object { $_.Device }) -join ' ') 'order'
+    Assert-Equal 'COM7 COM5 COM12 COM3' (($found.Ports | ForEach-Object { $_.Device }) -join ' ') 'order'
     Assert-Equal 'COM9 skipped: firmware USB CDC, REPL only' ($found.Skipped -join ';') 'skipped'
     function Get-SerialPorts { New-Port 'COM5' 0x10C4 0xEA60; New-Port 'COM4' 0x303A 0x0009 }
     Assert-Equal 'COM4' (Find-Ports).Ports[0].Device 'download mode first'
 }
 
-Test 'the next port is flashed when the first one has no chip behind it' {
+Test 'every board is flashed in turn, once even when plugged in by two cables' {
     $path = Store $BaseBuild
     function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
+    $ports = @((New-Port 'COM5' 0x10C4 0xEA60), (New-Port 'COM7' 0x303A 0x1001), (New-Port 'COM8' 0x1A86 0x7523),
+        (New-Port 'COM3' 0x2341 0x0043))
+    $chips = @{ COM7 = 'aa:00:00:00:00:01'; COM5 = 'aa:00:00:00:00:01'; COM8 = 'aa:00:00:00:00:02' }
+    $run = Invoke-MainOn '1.25.0' -Ports $ports -Chips $chips
+    Assert-Equal 'COM7 COM8' (@($run.Flashed | ForEach-Object { $_[0] }) -join ' ') 'flashed ports'
+    if (-not ($said -match 'same board as COM7')) { throw 'duplicate not reported' }
+}
+
+Test 'a failed board does not stop the others' {
+    Store $BaseBuild | Out-Null
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">download</a>" }
+    $ports = @((New-Port 'COM5' 0x10C4 0xEA60), (New-Port 'COM8' 0x1A86 0x7523))
+    $chips = @{ COM5 = 'aa:00:00:00:00:01'; COM8 = 'aa:00:00:00:00:02' }
+    $run = Invoke-MainOn '' -Ports $ports -Chips $chips -FailOn 'COM5'
+    Assert-Equal 'COM8' (@($run.Flashed | ForEach-Object { $_[0] }) -join ' ') 'flashed ports'
+    Assert-Equal 1 $run.Failures 'failures'
+    if (-not ($said -match 'write failed on COM5')) { throw 'failure not shown' }
+}
+
+Test 'no board at all stops with the reason' {
+    function Get-WebText { throw 'not needed' }
     $ports = @((New-Port 'COM5' 0x10C4 0xEA60), (New-Port 'COM7' 0x303A 0x1001))
-    $run = Invoke-MainOn '' -Ports $ports -Answering 'COM7'
-    Assert-Equal "COM7 ESP32-S3 $path False" ($run.Flashed[0] -join ' ') 'flash arguments'
-    Assert-Throws { Invoke-MainOn '' -Ports $ports -Answering 'COM1' } 'no chip on COM7'
+    Assert-Throws { Invoke-MainOn '' -Ports $ports -Chips @{} } 'no ESP32 answered on COM7, COM5'
+    Assert-Throws { Invoke-MainOn '' -Chips @{} } 'no chip on COM5'
+}
+
+Test 'chip, memory and MAC are read from esptool flash-id' {
+    function Invoke-Esptool {
+        [pscustomobject]@{ Code = 0; Seconds = 1; Output = @(
+                'Chip type:          ESP32-S3 (QFN56) (revision v0.2)'
+                'Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)'
+                'Crystal frequency:  40MHz'
+                'MAC:                24:58:7C:E1:23:45'
+                'Detected flash size: 16MB') -join "`n" }
+    }
+    $chip = Get-Chip 'COM5'
+    Assert-Equal 'ESP32-S3 8 16MB 24:58:7c:e1:23:45' "$($chip.Name) $($chip.PsramMb) $($chip.FlashSize) $($chip.Mac)" 'chip'
 }
 
 Test 'esptool progress lines are parsed' {

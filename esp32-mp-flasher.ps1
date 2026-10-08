@@ -43,9 +43,11 @@ $KnownDevices = @{
     '303a:4001' = 'firmware USB CDC, REPL only', $false
 }
 
-# which flashable port is tried first: a board held in download mode, then a bridge, which keeps
-# its port across resets, then USB-Serial/JTAG; adapters nobody recognises go last
-$PortRanks = @{ '303a:0002' = 0; '303a:0009' = 0; '303a:1001' = 2 }
+# the order ports are probed in, and the first port a board answers on is the one it is flashed
+# through: download mode, then USB-Serial/JTAG, then bridges, then adapters nobody recognises.
+# JTAG goes before bridges because probing through a bridge resets the chip, and with it the
+# JTAG port of a board plugged in by both cables; probing through JTAG leaves the bridge port alone
+$PortRanks = @{ '303a:0002' = 0; '303a:0009' = 0; '303a:1001' = 1 }
 
 $KnownVendors = @{
     0x0403 = 'FTDI bridge'
@@ -670,11 +672,11 @@ function Format-PortIds($Port) {
 function Get-PortRank($Port) {
     $rank = $PortRanks[(Format-PortIds $Port)]
     if ($null -ne $rank) { return $rank }
-    if ($KnownVendors[$Port.VendorId]) { return 1 }
+    if ($KnownVendors[$Port.VendorId]) { return 2 }
     3
 }
 
-# flashable ports, most likely board first; the caller moves on when a chip does not answer
+# flashable ports in probing order, with notes on the ones skipped
 function Find-Ports {
     Write-Step wait 'port' 'looking for boards' -Live
     $ports = @(Get-SerialPorts)
@@ -756,8 +758,8 @@ function Read-Banner([string]$Port) {
     }
 }
 
-# with -Next, a port that does not answer gives $null so the next one can be tried
-function Get-Chip([string]$Port, [switch]$Next) {
+# with -Optional, a port that does not answer gives $null, and esptool's words go to $ChipOutput
+function Get-Chip([string]$Port, [switch]$Optional) {
     $m = $null
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
         $phase = if ($attempt) { 'no answer, retrying' } else { 'connecting' }
@@ -767,8 +769,9 @@ function Get-Chip([string]$Port, [switch]$Next) {
         if ($attempt -eq 0) { Start-Sleep -Milliseconds 1500 }
     }
     if (-not $m.Success) {
-        if ($Next) {
-            Write-Step warn 'chip' "no answer on $Port" -Detail 'trying the next port'
+        if ($Optional) {
+            Write-Step skip 'chip' "no ESP32 answered on $Port" DarkGray
+            $script:ChipOutput = $out
             return $null
         }
         Write-Step fail 'chip' 'no answer from the bootloader'
@@ -776,10 +779,12 @@ function Get-Chip([string]$Port, [switch]$Next) {
     }
     $psram = [regex]::Match($out, 'Embedded PSRAM (\d+)MB')
     $flash = [regex]::Match($out, 'Detected flash size:\s*(\S+)')
+    $mac = [regex]::Match($out, 'MAC:\s*([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5,7})')
     $chip = [pscustomobject]@{
         Name      = ConvertTo-ChipName $m.Groups[1].Value
         PsramMb   = $(if ($psram.Success) { [int]$psram.Groups[1].Value } else { 0 })
         FlashSize = $(if ($flash.Success) { $flash.Groups[1].Value } else { '?' })
+        Mac       = $(if ($mac.Success) { $mac.Groups[1].Value.ToLower() } else { '' })
     }
     $psramText = if ($chip.PsramMb) { "$($chip.PsramMb)MB PSRAM" } else { 'no PSRAM' }
     Write-Step ok 'chip' $chip.Name -Detail "$($chip.FlashSize) flash $($G.Mid) $psramText"
@@ -910,7 +915,7 @@ function Test-FlashNeeded([string]$Change) {
 }
 
 # draws the card and returns the version change it shows
-function Write-Plan([string]$Board, [string]$Variant, $Build, [string]$Current, [string]$Chip) {
+function Write-Plan([string]$Port, [string]$Board, [string]$Variant, $Build, [string]$Current, [string]$Chip) {
     $change, $color = Get-VersionChange $Current $Build.Version
     $cached = Test-Path -LiteralPath (Join-Path $Cache $Build.Name) -PathType Leaf
     $version = if ($change -eq 'up to date') {
@@ -920,7 +925,7 @@ function Write-Plan([string]$Board, [string]$Variant, $Build, [string]$Current, 
             "  $($G.Arrow)  ", 'DarkGray', $Build.Version, 'White', '     ', 'Gray', $change, $color)
     }
     Write-Ui
-    Write-Card ($Board + $(if ($Variant) { "-$Variant" })) @(
+    Write-Card ("$Port $($G.Mid) $Board" + $(if ($Variant) { "-$Variant" })) @(
         , @()
         , $version
         , @('offset ', 'DarkGray', (Format-Offset $Chip), 'Gray', "   $($G.Mid)   ", 'DarkGray',
@@ -942,13 +947,13 @@ function Select-Action($Build, $Builds, [bool]$Needed = $true) {
         $keys += 'v'
         $colors += ''
     }
-    $items += 'quit'
+    $items += 'skip'
     $hints += 'leave the board as it is'
-    $keys += 'q'
+    $keys += 's'
     $colors += ''
-    $quit = $items.Count - 1
-    $default = if ($Needed) { 0 } else { $quit }
-    $keys[(Select-Item $items '' $hints $default $keys $colors -Escape $quit -Always)]
+    $skip = $items.Count - 1
+    $default = if ($Needed) { 0 } else { $skip }
+    $keys[(Select-Item $items '' $hints $default $keys $colors -Escape $skip -Always)]
 }
 
 function Confirm-Erase {
@@ -994,45 +999,64 @@ function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase)
     Fail 'flashing failed at every baud rate, esptool said:' $r.Output
 }
 
-function Main {
-    $env:COLUMNS = '200'
-    $env:NO_COLOR = '1'
-    $env:TERM = 'dumb'
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-
-    Write-Title
-    Initialize-Input | Out-Null
-    Initialize-Esptool
+# every board on the ports, once each: a board plugged in by two cables answers with the same MAC
+function Find-Boards {
     $found = Find-Ports
-
-    $chip = $null
-    for ($i = 0; -not $chip; $i++) {
-        $candidate = $found.Ports[$i]
-        $port = $candidate.Device
-        Write-Step ok 'port' $port -Detail $candidate.Hint
+    $boards = @()
+    $seen = @{}
+    for ($i = 0; $i -lt $found.Ports.Count; $i++) {
+        $port = $found.Ports[$i].Device
+        if ($i) { Write-Ui }
+        Write-Step ok 'port' $port -Detail $found.Ports[$i].Hint
         if ($i -eq 0 -and $found.Skipped) { Write-Note ($found.Skipped -join "`n") }
 
         Write-Step wait 'repl' 'listening' -Live
         $banner = Read-Banner $port
         $current = Get-BannerInfo $banner
-        $currentVersion = if ($current) { $current.Version } else { '' }
         if ($current) {
-            Write-Step ok 'repl' "MicroPython $currentVersion" -Detail $current.Machine
+            Write-Step ok 'repl' "MicroPython $($current.Version)" -Detail $current.Machine
         } else {
             Write-Step skip 'repl' 'no MicroPython answer' DarkGray
         }
         Start-Sleep -Milliseconds 500
 
-        $chip = Get-Chip $port -Next:($i -lt $found.Ports.Count - 1)
+        $chip = Get-Chip $port -Optional:($found.Ports.Count -gt 1)
+        if (-not $chip) { continue }
+        if ($chip.Mac -and $seen.ContainsKey($chip.Mac)) {
+            Write-Note "same board as $($seen[$chip.Mac]), already listed"
+            continue
+        }
+        if ($chip.Mac) { $seen[$chip.Mac] = $port }
+        $boards += [pscustomobject]@{
+            Port    = $port
+            Chip    = $chip
+            Banner  = $banner
+            Version = $(if ($current) { $current.Version } else { '' })
+        }
     }
-    $board = $Boards[$chip.Name]
-    if (-not $board) { Fail "unsupported chip: $($chip.Name)" }
+    if (-not $boards) {
+        Fail "no ESP32 answered on $(@($found.Ports | ForEach-Object { $_.Device }) -join ', '), esptool said:" $ChipOutput
+    }
+    $boards
+}
 
-    $builds = Get-Builds $board
-    $guess = Get-VariantGuess $chip.Name $banner $chip.PsramMb $builds
+# one board from plan to running firmware; $Catalog keeps the builds already looked up per board name
+function Update-Board($Target, $Catalog) {
+    $port = $Target.Port
+    $chip = $Target.Chip
+    $result = [pscustomobject]@{ Port = $port; Chip = $chip.Name; From = $Target.Version; To = ''; Outcome = 'failed' }
+    $board = $Boards[$chip.Name]
+    if (-not $board) { Fail "unsupported chip on ${port}: $($chip.Name)" }
+
+    if (-not $Catalog.ContainsKey($board)) {
+        Write-Ui
+        $Catalog[$board] = Get-Builds $board
+    }
+    $builds = $Catalog[$board]
+    $guess = Get-VariantGuess $chip.Name $Target.Banner $chip.PsramMb $builds
     $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
-        Write-Note 'the build this board needs is not available, pick one'
+        Write-Note "the build $port needs is not available, pick one"
         $variant = Select-Variant $builds '' $guess
     }
 
@@ -1040,36 +1064,35 @@ function Main {
     while ($true) {
         $top = Get-Row
         $build = $builds[$variant]
-        $needed = Test-FlashNeeded (Write-Plan $board $variant $build $currentVersion $chip.Name)
-        if ($auto -and $needed -and -not (Wait-Countdown "flash $($build.Version)" $Countdown)) {
+        $needed = Test-FlashNeeded (Write-Plan $port $board $variant $build $Target.Version $chip.Name)
+        $action = if ($needed) { "flash $($build.Version)" } else { 'skip' }
+        if ($auto -and -not (Wait-Countdown $action $Countdown)) {
             Clear-Live
-            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "flash $($build.Version)", 'White')
-            $answer = 'f'
-            break
-        }
-        $auto = $false
-        $answer = Select-Action $build $builds $needed
-        if ($answer -eq 'q') {
+            $answer = if ($needed) { 'f' } else { 's' }
+        } else {
+            $auto = $false
+            $answer = Select-Action $build $builds $needed
+            if ($answer -eq 'e' -and -not (Confirm-Erase)) {
+                Clear-Since $top
+                continue
+            }
+            if ($answer -eq 'v') {
+                Clear-Since $top
+                $variant = Select-Variant $builds $variant $guess
+                continue
+            }
             Write-Ui
-            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'quit, nothing written', 'DarkGray')
-            return
+        }
+        if ($answer -eq 's') {
+            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'skipped, nothing written', 'DarkGray')
+            $result.Outcome = 'skipped'
+            return $result
         }
         if ($answer -eq 'e') {
-            if (Confirm-Erase) {
-                Write-Ui
-                Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Yellow', 'erase + flash', 'White')
-                break
-            }
-            Clear-Since $top
-            continue
+            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Yellow', 'erase + flash', 'White')
+        } else {
+            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "flash $($build.Version)", 'White')
         }
-        if ($answer -eq 'v') {
-            Clear-Since $top
-            $variant = Select-Variant $builds $variant $guess
-            continue
-        }
-        Write-Ui
-        Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "flash $($build.Version)", 'White')
         break
     }
     Write-Ui
@@ -1081,10 +1104,11 @@ function Main {
     Start-Sleep -Seconds 2
     $port = Wait-Board $before $port
     Write-Step ok 'reboot' "back on $port"
+    $result.Outcome = 'flashed'
+    $result.To = $build.Version
 
     Write-Step wait 'repl' 'listening' -Live
-    $after = Read-Banner $port
-    $running = Get-BannerInfo $after
+    $running = Get-BannerInfo (Read-Banner $port)
     if ($running) {
         Write-Step ok 'repl' "MicroPython $($running.Version)" -Detail $running.Machine
         Write-Ui
@@ -1094,6 +1118,53 @@ function Main {
         Write-Ui
         Write-Line @('  ', 'Gray', 'Flashed', 'Green', " at $baud baud", 'Gray')
     }
+    $result
+}
+
+function Write-Summary($Results) {
+    Write-Ui
+    Write-Line @('  ', 'Gray', 'Done.', 'Green', "   $($Results.Count) boards", 'Gray')
+    foreach ($r in $Results) {
+        $label = $r.Port.PadRight(7) + $r.Chip.PadRight(10)
+        if ($r.Outcome -eq 'flashed') {
+            if ($r.From) {
+                Write-Step ok $label "$($r.From)  $($G.Arrow)  $($r.To)" -Detail 'updated'
+            } else {
+                Write-Step ok $label $r.To -Detail 'installed'
+            }
+        } elseif ($r.Outcome -eq 'skipped') {
+            Write-Step skip $label $(if ($r.From) { $r.From } else { 'no MicroPython' }) Gray -Detail 'left as it was'
+        } else {
+            Write-Step fail $label 'failed' Red -Detail 'see above'
+        }
+    }
+}
+
+function Main {
+    $env:COLUMNS = '200'
+    $env:NO_COLOR = '1'
+    $env:TERM = 'dumb'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+    Write-Title
+    Initialize-Input | Out-Null
+    Initialize-Esptool
+    $targets = @(Find-Boards)
+
+    $catalog = @{}
+    $results = @()
+    $script:BoardFailures = 0
+    foreach ($target in $targets) {
+        try {
+            $results += Update-Board $target $catalog
+        } catch {
+            if ($targets.Count -eq 1) { throw }
+            Write-Failure $_
+            $script:BoardFailures++
+            $results += [pscustomobject]@{ Port = $target.Port; Chip = $target.Chip.Name; From = $target.Version; To = ''; Outcome = 'failed' }
+        }
+    }
+    if ($targets.Count -gt 1) { Write-Summary $results }
 }
 
 
@@ -1104,6 +1175,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ($Interactive) { [Console]::CursorVisible = $false }
         if ([Console]::IsInputRedirected) { Fail 'run this from a console' }
         Main
+        if ($BoardFailures) { $status = 1 }
     } catch {
         Write-Failure $_
         $status = 1
