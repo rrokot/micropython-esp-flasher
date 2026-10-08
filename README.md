@@ -5,6 +5,15 @@ Uses local firmware first; checks online when no local build exists or when requ
 No arguments, no configuration, nothing to install: it is a Windows PowerShell
 script plus Espressif's standalone `esptool.exe`.
 
+![The flasher has found an ESP32-S3, picked the octal-PSRAM build and offers to update it from 1.28.0 to 1.29.0](docs/menu.svg)
+
+## Download
+
+Get `esp32-mp-flasher-vX.Y.Z.zip` from the
+[latest release](https://github.com/rrokot/esp32-mp-flasher/releases/latest),
+unpack it anywhere and double-click `esp32-mp-flasher.cmd`. The zip already
+contains `esptool.exe`, so only the firmware itself needs the internet.
+
 ## Usage
 
 Double-click `esp32-mp-flasher.cmd`, or:
@@ -14,36 +23,13 @@ powershell -ExecutionPolicy Bypass -File esp32-mp-flasher.ps1
 ```
 
 It runs on the Windows PowerShell 5.1 that ships with Windows 10 and 11, and on
-PowerShell 7. On the first run it downloads the latest `esptool.exe` from
+PowerShell 7. Without a bundled `esptool.exe`, as in a clone of this repository,
+the first run downloads the latest one from
 [espressif/esptool releases](https://github.com/espressif/esptool/releases) into
 the `esptool` folder next to the script. To update esptool, delete that folder.
 
 It finds the board, identifies the chip, works out which build belongs on it,
-prints what it is about to do and waits:
-
-```
-  esp32-mp-flasher   flash stable MicroPython onto ESP32
-  ────────────────────────────────────────────────────────────
-
-  ● port      COM5   Silicon Labs bridge  10c4:ea60
-  ● repl      MicroPython 1.28.0   Generic ESP32S3 module with Octal-SPIRAM
-  ● chip      ESP32-S3   8MB flash · 8MB PSRAM
-  ● firmware  local copy   u checks micropython.org for a newer one
-
-  ┌─ ESP32_GENERIC_S3-SPIRAM_OCT ──────────────────────────────┐
-  │                                                            │
-  │  1.28.0  →  1.29.0     update                              │
-  │  offset 0x0   ·   cached                                   │
-  │                                                            │
-  └────────────────────────────────────────────────────────────┘
-
-  ► f  flash 1.29.0    keeps the files on the board
-    e  erase + flash   wipes the whole chip, files included
-    v  other build     base, SPIRAM_OCT
-    u  check online    look for a newer release on micropython.org
-    q  quit            leave the board as it is
-    ↑↓ or mouse   enter choose   esc back
-```
+prints what it is about to do and waits, as in the picture above.
 
 Every list, this one included, works with the arrows or the mouse wheel, by
 hovering and clicking, or by pressing the row's key. Keys act on a single
@@ -54,6 +40,8 @@ wipes the whole chip, including the filesystem, and asks again first.
 `check online` looks for the latest stable releases on the website. While
 esptool works, a progress bar replaces its output; if it fails, the tail of
 that output is shown with the error.
+
+![After flashing, the board reboots and its REPL reports MicroPython 1.29.0](docs/done.svg)
 
 With more than one board plugged in, the same kind of list asks which one.
 

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="666" height="453" viewBox="0 0 666 453" role="img" aria-label="esp32-mp-flasher">
+<rect width="666" height="453" rx="8" fill="#0C0C0C"/>
+<rect width="666" height="30" rx="8" fill="#1F1F1F"/><rect y="22" width="666" height="8" fill="#1F1F1F"/>
+<circle cx="18" cy="15" r="5" fill="#E74856"/><circle cx="36" cy="15" r="5" fill="#C19C00"/><circle cx="54" cy="15" r="5" fill="#16C60C"/>
+<text x="333" y="19.5" text-anchor="middle" fill="#9D9D9D" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12">esp32-mp-flasher</text>
+<g font-family="Cascadia Mono, Consolas, 'DejaVu Sans Mono', Menlo, monospace" font-size="14" xml:space="preserve">
+<text x="34.8" y="58" fill="#61D6D6" textLength="134.4" lengthAdjust="spacingAndGlyphs">esp32-mp-flasher</text>
+<text x="194.4" y="58" fill="#767676" textLength="294" lengthAdjust="spacingAndGlyphs">flash stable MicroPython onto ESP32</text>
+<text x="34.8" y="75" fill="#767676" textLength="504" lengthAdjust="spacingAndGlyphs">────────────────────────────────────────────────────────────</text>
+<text x="34.8" y="109" fill="#16C60C" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="51.6" y="109" fill="#767676" textLength="33.6" lengthAdjust="spacingAndGlyphs">port</text>
+<text x="135.6" y="109" fill="#F2F2F2" textLength="33.6" lengthAdjust="spacingAndGlyphs">COM5</text>
+<text x="194.4" y="109" fill="#767676" textLength="159.6" lengthAdjust="spacingAndGlyphs">Silicon Labs bridge</text>
+<text x="370.8" y="109" fill="#767676" textLength="75.6" lengthAdjust="spacingAndGlyphs">10c4:ea60</text>
+<text x="135.6" y="126" fill="#767676" textLength="344.4" lengthAdjust="spacingAndGlyphs">COM9 skipped: firmware USB CDC, REPL only</text>
+<text x="34.8" y="143" fill="#16C60C" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="51.6" y="143" fill="#767676" textLength="33.6" lengthAdjust="spacingAndGlyphs">repl</text>
+<text x="135.6" y="143" fill="#F2F2F2" textLength="151.2" lengthAdjust="spacingAndGlyphs">MicroPython 1.28.0</text>
+<text x="312" y="143" fill="#767676" textLength="336" lengthAdjust="spacingAndGlyphs">Generic ESP32S3 module with Octal-SPIRAM</text>
+<text x="34.8" y="160" fill="#16C60C" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="51.6" y="160" fill="#767676" textLength="33.6" lengthAdjust="spacingAndGlyphs">chip</text>
+<text x="135.6" y="160" fill="#F2F2F2" textLength="67.2" lengthAdjust="spacingAndGlyphs">ESP32-S3</text>
+<text x="228" y="160" fill="#767676" textLength="176.4" lengthAdjust="spacingAndGlyphs">8MB flash · 8MB PSRAM</text>
+<text x="34.8" y="177" fill="#16C60C" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="51.6" y="177" fill="#767676" textLength="67.2" lengthAdjust="spacingAndGlyphs">firmware</text>
+<text x="135.6" y="177" fill="#F2F2F2" textLength="84" lengthAdjust="spacingAndGlyphs">local copy</text>
+<text x="244.8" y="177" fill="#767676" textLength="336" lengthAdjust="spacingAndGlyphs">u checks micropython.org for a newer one</text>
+<text x="34.8" y="211" fill="#767676" textLength="16.8" lengthAdjust="spacingAndGlyphs">┌─</text>
+<text x="60" y="211" fill="#61D6D6" textLength="226.8" lengthAdjust="spacingAndGlyphs">ESP32_GENERIC_S3-SPIRAM_OCT</text>
+<text x="295.2" y="211" fill="#767676" textLength="260.4" lengthAdjust="spacingAndGlyphs">──────────────────────────────┐</text>
+<text x="34.8" y="228" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="547.2" y="228" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="34.8" y="245" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="60" y="245" fill="#CCCCCC" textLength="50.4" lengthAdjust="spacingAndGlyphs">1.28.0</text>
+<text x="127.2" y="245" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">→</text>
+<text x="152.4" y="245" fill="#F2F2F2" textLength="50.4" lengthAdjust="spacingAndGlyphs">1.29.0</text>
+<text x="244.8" y="245" fill="#16C60C" textLength="50.4" lengthAdjust="spacingAndGlyphs">update</text>
+<text x="547.2" y="245" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="34.8" y="262" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="60" y="262" fill="#767676" textLength="50.4" lengthAdjust="spacingAndGlyphs">offset</text>
+<text x="118.8" y="262" fill="#CCCCCC" textLength="25.2" lengthAdjust="spacingAndGlyphs">0x0</text>
+<text x="169.2" y="262" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">·</text>
+<text x="202.8" y="262" fill="#CCCCCC" textLength="50.4" lengthAdjust="spacingAndGlyphs">cached</text>
+<text x="547.2" y="262" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="34.8" y="279" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="547.2" y="279" fill="#767676" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="34.8" y="296" fill="#767676" textLength="520.8" lengthAdjust="spacingAndGlyphs">└────────────────────────────────────────────────────────────┘</text>
+<text x="34.8" y="330" fill="#61D6D6" textLength="8.4" lengthAdjust="spacingAndGlyphs">►</text>
+<text x="51.6" y="330" fill="#F2F2F2" textLength="100.8" lengthAdjust="spacingAndGlyphs">flash 1.29.0</text>
+<text x="34.8" y="364" fill="#16C60C" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="51.6" y="364" fill="#767676" textLength="42" lengthAdjust="spacingAndGlyphs">write</text>
+<text x="135.6" y="364" fill="#F2F2F2" textLength="134.4" lengthAdjust="spacingAndGlyphs">1.5 MB in 11.3 s</text>
+<text x="295.2" y="364" fill="#767676" textLength="100.8" lengthAdjust="spacingAndGlyphs">2000000 baud</text>
+<text x="34.8" y="381" fill="#16C60C" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="51.6" y="381" fill="#767676" textLength="50.4" lengthAdjust="spacingAndGlyphs">reboot</text>
+<text x="135.6" y="381" fill="#F2F2F2" textLength="100.8" lengthAdjust="spacingAndGlyphs">back on COM5</text>
+<text x="34.8" y="398" fill="#16C60C" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="51.6" y="398" fill="#767676" textLength="33.6" lengthAdjust="spacingAndGlyphs">repl</text>
+<text x="135.6" y="398" fill="#F2F2F2" textLength="151.2" lengthAdjust="spacingAndGlyphs">MicroPython 1.29.0</text>
+<text x="312" y="398" fill="#767676" textLength="336" lengthAdjust="spacingAndGlyphs">Generic ESP32S3 module with Octal-SPIRAM</text>
+<text x="34.8" y="432" fill="#16C60C" textLength="50.4" lengthAdjust="spacingAndGlyphs">Ready.</text>
+<text x="110.4" y="432" fill="#CCCCCC" textLength="310.8" lengthAdjust="spacingAndGlyphs">MicroPython 1.29.0 is running on COM5</text>
+</g>
+</svg>
