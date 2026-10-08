@@ -1,48 +1,39 @@
 # micropython-esp-flasher
 
-Installs MicroPython on every connected ESP board, or updates it to the latest
-stable release. Nothing to configure or install: a Windows PowerShell script
-plus Espressif's `esptool.exe`.
+Install or update MicroPython on ESP boards from a Windows 10 or 11 (x64) computer.
 
-![The flasher has found an ESP32-S3 running MicroPython 1.28.0 and counts down to updating it to 1.29.0](docs/screen.svg)
+![MicroPython update countdown](docs/screen.svg)
 
 ## Usage
 
-Download the zip from the
-[latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest),
-unpack it and double-click `micropython-esp-flasher.cmd`. Works on Windows 10 and 11.
+1. Download the ZIP file from the [latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest).
+2. Extract the ZIP file.
+3. Connect your boards to the computer.
+4. Double-click `micropython-esp-flasher.cmd`.
 
-For each board it finds, it picks the build the hardware needs and counts down
-5 seconds:
+The tool detects the boards and selects a firmware build.
+It waits 5 seconds before it writes firmware or skips a board.
+Press a key or click during this time to open the menu.
+Select `flash`, `erase + flash`, `other build`, or `skip`.
+`erase + flash` deletes all files on the board.
 
-- no MicroPython, an older version, or the wrong build for the board (say, the
-  base build on a module with octal PSRAM): flashes it;
-- already the latest, right build: leaves it alone.
-
-Files on the board are kept. If the new build would keep them elsewhere and so
-lose them, it asks first: cancel, or erase + flash.
-
-Press any key or click during the countdown for a menu: `flash`,
-`erase + flash` (wipes the files too), `other build`, `skip`. Arrows, mouse or
-the row's key all work.
-
-Ports are found on their own. Serial adapters that ESP boards don't use (an
-Arduino, say) are not touched; they are offered at the end in case one is
-an ESP board after all.
-
-Every run writes a log to the `logs` folder, with esptool's full output and
-what each board answered; the last 30 are kept. Attach it when reporting a
-problem.
+To report a problem, include the log file from the `logs` folder.
 
 ## Offline
 
-Downloaded firmware is kept in the `firmware` folder and reused, the newest build
-of each variant only. Without
-internet, the newest build there counts as the latest. To prepare an offline
-computer, run the flasher once online for each kind of board, then copy the
-whole folder.
+The tool stores downloaded firmware in the `firmware` folder for reuse.
+For offline use:
+
+1. With the computer online, install each required firmware build on a board.
+2. Copy the complete tool folder to the offline computer.
 
 ## Development
 
-Tests: `powershell -ExecutionPolicy Bypass -File micropython-esp-flasher.Tests.ps1`.
-A clone has no `esptool.exe`; the first run downloads it.
+To run the tests, use this command:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File micropython-esp-flasher.Tests.ps1
+```
+
+A source code copy does not include `esptool.exe`.
+The tool downloads it on the first run.
