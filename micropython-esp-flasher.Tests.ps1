@@ -249,7 +249,7 @@ Test 'whether the files move is told by the filesystem start, or the variant wit
     Assert-Equal 'True' (Test-FilesMove 'ESP8266' 'x.bin' $running $null '') 'esp8266 naming no variant'
 }
 
-Test 'ports are probed download mode first, then jtag, then bridges; unknown adapters are not' {
+Test 'ports are probed espressif usb first, then bridges; unknown adapters are not' {
     function Get-SerialPorts {
         New-Port 'COM3' 0x2341 0x0043
         New-Port 'COM7' 0x303A 0x1001

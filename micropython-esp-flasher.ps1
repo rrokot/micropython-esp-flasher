@@ -14,20 +14,10 @@ $WriteOptions = @{
     'ESP8266' = @('--flash-size', 'detect')
 }
 
-$KnownDevices = @{
-    '303a:1001' = 'ESP32 USB-Serial/JTAG', $true
-    '303a:0002' = 'ESP32-S2 ROM download mode', $true
-    '303a:0009' = 'ESP32-S3 ROM download mode', $true
-    '303a:4001' = 'firmware USB CDC, REPL only', $false
-}
+# the port MicroPython's own USB opens: the REPL only, gone when the chip resets, so esptool
+# cannot flash through it. every other Espressif USB device is a chip's own USB and is probed
+$FirmwareUsb = '303a:4001'
 
-# the order ports are probed in, and the first port a board answers on is the one it is flashed
-# through: download mode, then USB-Serial/JTAG, then bridges. JTAG goes before bridges because
-# probing through a bridge resets the chip, and with it the JTAG port of a board plugged in by
-# both cables; probing through JTAG leaves the bridge port alone
-$PortRanks = @{ '303a:0002' = 0; '303a:0009' = 0; '303a:1001' = 1 }
-
-# any other Espressif USB device is a chip's own USB, so it is probed as well
 $KnownVendors = @{
     0x303A = 'Espressif USB'
     0x0403 = 'FTDI bridge'
@@ -765,8 +755,7 @@ function Get-SerialPorts {
 }
 
 function Get-PortClass($Port) {
-    $known = $KnownDevices['{0:x4}:{1:x4}' -f $Port.VendorId, $Port.ProductId]
-    if ($known) { return $known }
+    if ((Format-PortIds $Port) -eq $FirmwareUsb) { return 'firmware USB CDC, REPL only', $false }
     $vendor = $KnownVendors[$Port.VendorId]
     if ($vendor) { return $vendor, $true }
     # ESP boards come with Espressif USB or one of the bridges above; anything else is left
@@ -778,11 +767,11 @@ function Format-PortIds($Port) {
     '{0:x4}:{1:x4}' -f $Port.VendorId, $Port.ProductId
 }
 
+# the order ports are probed in, and the first port a board answers on is the one it is flashed
+# through: the chip's own USB, then bridges. probing through a bridge resets the chip, and with it
+# the USB port of a board plugged in by both cables; probing through its USB leaves the bridge alone
 function Get-PortRank($Port) {
-    $rank = $PortRanks[(Format-PortIds $Port)]
-    if ($null -ne $rank) { return $rank }
-    if ($Port.VendorId -eq 0x303A) { return 1 }
-    2
+    if ($Port.VendorId -eq 0x303A) { 0 } else { 1 }
 }
 
 # flashable ports in probing order, notes on the ones skipped, and the unknown adapters,
@@ -810,8 +799,8 @@ function Find-Ports {
         }
         $skipped += "$($p.Device) skipped: $label"
         $ids = Format-PortIds $p
-        if ($ids -eq '303a:4001') { $cdc = $true }
-        elseif (-not $KnownDevices[$ids]) {
+        if ($ids -eq $FirmwareUsb) { $cdc = $true }
+        else {
             $entry.Hint = "unknown adapter  $ids"
             $unprobed += $entry
         }
