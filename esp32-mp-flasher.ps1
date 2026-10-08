@@ -44,8 +44,7 @@ $KnownDevices = @{
 }
 
 # the order ports are probed in, and the first port a board answers on is the one it is flashed
-# through: download mode, then USB-Serial/JTAG, then bridges, then adapters nobody recognises.
-# JTAG goes before bridges because probing through a bridge resets the chip, and with it the
+# through: download mode, then USB-Serial/JTAG, then bridges. JTAG goes before bridges because probing through a bridge resets the chip, and with it the
 # JTAG port of a board plugged in by both cables; probing through JTAG leaves the bridge port alone
 $PortRanks = @{ '303a:0002' = 0; '303a:0009' = 0; '303a:1001' = 1 }
 
@@ -662,7 +661,9 @@ function Get-PortClass($Port) {
     if ($known) { return $known }
     $vendor = $KnownVendors[$Port.VendorId]
     if ($vendor) { return $vendor, $true }
-    'unknown adapter', $true
+    # ESP32 boards come with Espressif USB or one of the bridges above; anything else is left
+    # untouched, since probing toggles DTR/RTS and types into the port
+    "unknown adapter $(Format-PortIds $Port), not probed", $false
 }
 
 function Format-PortIds($Port) {
@@ -672,8 +673,7 @@ function Format-PortIds($Port) {
 function Get-PortRank($Port) {
     $rank = $PortRanks[(Format-PortIds $Port)]
     if ($null -ne $rank) { return $rank }
-    if ($KnownVendors[$Port.VendorId]) { return 2 }
-    3
+    2
 }
 
 # flashable ports in probing order, with notes on the ones skipped
@@ -687,6 +687,7 @@ function Find-Ports {
 
     $usable = @()
     $skipped = @()
+    $cdc = $false
     foreach ($p in $ports) {
         $label, $flashable = Get-PortClass $p
         if ($flashable) {
@@ -694,15 +695,19 @@ function Find-Ports {
                 Number = [int]($p.Device -replace '\D', '') }
         } else {
             $skipped += "$($p.Device) skipped: $label"
+            if ((Format-PortIds $p) -eq '303a:4001') { $cdc = $true }
         }
     }
 
     if (-not $usable) {
         Write-Step fail 'port' 'no flashable port'
         Write-Note ($skipped -join "`n")
-        Fail ("no port that can be flashed`n" +
-            "this board exposes only its firmware serial port`n" +
-            'hold BOOT, tap RESET, release BOOT and run again')
+        if ($cdc) {
+            Fail ("no port that can be flashed`n" +
+                "this board exposes only its firmware serial port`n" +
+                'hold BOOT, tap RESET, release BOOT and run again')
+        }
+        Fail 'no ESP32 board among the serial ports, plug one in'
     }
     [pscustomobject]@{ Ports = @($usable | Sort-Object Rank, Number); Skipped = $skipped }
 }

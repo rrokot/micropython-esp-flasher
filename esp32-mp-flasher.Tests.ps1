@@ -200,7 +200,7 @@ Test 'an up to date or newer board is skipped unless the countdown is interrupte
     Assert-Equal 1 $run.Flashed.Count 'flash on request'
 }
 
-Test 'ports are probed download mode first, then jtag, bridges, unknown adapters' {
+Test 'ports are probed download mode first, then jtag, then bridges; unknown adapters are not' {
     function Get-SerialPorts {
         New-Port 'COM3' 0x2341 0x0043
         New-Port 'COM7' 0x303A 0x1001
@@ -209,10 +209,15 @@ Test 'ports are probed download mode first, then jtag, bridges, unknown adapters
         New-Port 'COM9' 0x303A 0x4001
     }
     $found = Find-Ports
-    Assert-Equal 'COM7 COM5 COM12 COM3' (($found.Ports | ForEach-Object { $_.Device }) -join ' ') 'order'
-    Assert-Equal 'COM9 skipped: firmware USB CDC, REPL only' ($found.Skipped -join ';') 'skipped'
+    Assert-Equal 'COM7 COM5 COM12' (($found.Ports | ForEach-Object { $_.Device }) -join ' ') 'order'
+    Assert-Equal 'COM3 skipped: unknown adapter 2341:0043, not probed;COM9 skipped: firmware USB CDC, REPL only' `
+        ($found.Skipped -join ';') 'skipped'
     function Get-SerialPorts { New-Port 'COM5' 0x10C4 0xEA60; New-Port 'COM4' 0x303A 0x0009 }
     Assert-Equal 'COM4' (Find-Ports).Ports[0].Device 'download mode first'
+    function Get-SerialPorts { New-Port 'COM3' 0x2341 0x0043 }
+    Assert-Throws { Find-Ports } 'no ESP32 board among the serial ports'
+    function Get-SerialPorts { New-Port 'COM3' 0x2341 0x0043; New-Port 'COM9' 0x303A 0x4001 }
+    Assert-Throws { Find-Ports } 'hold BOOT'
 }
 
 Test 'every board is flashed in turn, once even when plugged in by two cables' {

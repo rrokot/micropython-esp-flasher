@@ -52,9 +52,11 @@ esptool works, a progress bar replaces its output; if it fails, the tail of
 that output is shown with the error.
 
 Ports are never asked for. Every flashable port is probed, in order: a board
-held in download mode, then USB-Serial/JTAG, then USB-UART bridges, then
-adapters it does not recognise. A port where no ESP32 answers is noted and
-passed over. A board plugged in through both its UART and its native USB
+held in download mode, then USB-Serial/JTAG, then USB-UART bridges (Silicon
+Labs, WCH, FTDI, Prolific). A port where no ESP32 answers is noted and passed
+over. Adapters with any other USB vendor are listed but not probed: ESP32
+boards do not use them, and probing toggles DTR/RTS, which resets an Arduino,
+and types into the port. A board plugged in through both its UART and its native USB
 connector shows up on two ports; the chip's MAC address gives it away, and it
 is flashed once, through the port it answered on first. JTAG is probed before
 the bridges because probing through a bridge resets the chip, and with it the
