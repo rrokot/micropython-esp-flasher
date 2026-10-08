@@ -11,8 +11,9 @@ function Select-BridgePort {
     }
     $devices = @($ports | ForEach-Object { $_.Device })
     $hints = @($ports | ForEach-Object { "$((Get-PortClass $_)[0])  $(Format-PortIds $_)" })
-    $port = Select-Item $devices 'which bridge?' $hints
-    Write-Step ok 'port' $port -Detail $hints[[array]::IndexOf($devices, $port)]
+    $index = Select-Item $devices 'which bridge?' $hints
+    $port = $devices[$index]
+    Write-Step ok 'port' $port -Detail $hints[$index]
     $port
 }
 
@@ -55,9 +56,9 @@ function Start-Bench {
     $fw = Get-NewestFirmware
     $header = "port $port   chip $chip   image $($fw.Name)"
     Write-Step ok 'image' $fw.Name -Detail (Format-Size $fw.Length)
-    Write-Ui
-    Write-Line @('  ', 'Gray', 'this erases the whole chip, files on the board included   ', 'Yellow', 'y', 'Cyan', ' start   ', 'DarkGray', 'n', 'Cyan', ' quit', 'DarkGray')
-    if ((Read-Key).Key -ne 'Y') { return }
+    $start = Select-Item @('no, quit', 'yes, start') 'this erases the whole chip, files on the board included' `
+        @('', '') 0 @('n', 'y') @('', 'Yellow') -Escape 0 -TitleColor Yellow -Always
+    if ($start -ne 1) { return }
     Write-Ui
 
     $runs = @(

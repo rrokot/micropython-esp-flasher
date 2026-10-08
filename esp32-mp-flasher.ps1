@@ -196,15 +196,6 @@ function Write-Card([string]$Title, [object[]]$Rows) {
     Write-Line @('  ', 'Gray', "$($G.BL)$($G.H * ($inner + 2))$($G.BR)", 'DarkGray')
 }
 
-function Write-Keys([object[]]$Keys) {
-    # pairs of key and what it does
-    $parts = @('  ', 'Gray')
-    for ($i = 0; $i -lt $Keys.Count; $i += 2) {
-        $parts += @($Keys[$i], 'Cyan', " $($Keys[$i + 1])   ", 'DarkGray')
-    }
-    Write-Line $parts
-}
-
 function Write-Failure($ErrorRecord) {
     Close-Live
     Write-Ui
@@ -236,10 +227,6 @@ function Fail([string]$Message, [string]$Details = '') {
     throw $e
 }
 
-function Read-Key {
-    [Console]::ReadKey($true)
-}
-
 function Read-Line([string]$Prompt) {
     Write-Ui $Prompt -NoNewline
     $line = [Console]::ReadLine()
@@ -247,63 +234,184 @@ function Read-Line([string]$Prompt) {
     $line.Trim()
 }
 
-# keys are matched by position, so e/v/u/q work on any keyboard layout
-function Read-Action([string[]]$Keys) {
-    while ($true) {
-        $key = Read-Key
-        if ($key.Key -eq 'Enter') { return '' }
-        if ($key.Key -eq 'Escape') { return 'q' }
-        $name = "$($key.Key)".ToLower()
-        if ($Keys -contains $name) { return $name }
+# [Console]::ReadKey never sees the mouse; ReadConsoleInput does once mouse input is on.
+# Quick Edit has to be off meanwhile, or conhost turns every click into a text selection.
+$ConsoleInputSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class EspFlasherInput {
+    [StructLayout(LayoutKind.Explicit)]
+    struct Record {
+        [FieldOffset(0)] public ushort Type;
+        [FieldOffset(4)] public int KeyDown;
+        [FieldOffset(10)] public ushort VirtualKey;
+        [FieldOffset(4)] public short X;
+        [FieldOffset(6)] public short Y;
+        [FieldOffset(8)] public uint Buttons;
+        [FieldOffset(16)] public uint Flags;
+    }
+
+    [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int handle);
+    [DllImport("kernel32.dll")] static extern bool GetConsoleMode(IntPtr handle, out uint mode);
+    [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr handle, uint mode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadConsoleInputW(IntPtr handle, [Out] Record[] records, uint length, out uint read);
+
+    const uint MouseInput = 0x10, QuickEdit = 0x40, ExtendedFlags = 0x80, VirtualTerminalInput = 0x200;
+
+    public static uint Enable() {
+        IntPtr input = GetStdHandle(-10);
+        uint mode;
+        GetConsoleMode(input, out mode);
+        SetConsoleMode(input, (mode | MouseInput | ExtendedFlags) & ~QuickEdit & ~VirtualTerminalInput);
+        return mode;
+    }
+
+    public static void Restore(uint mode) {
+        SetConsoleMode(GetStdHandle(-10), mode);
+    }
+
+    // kind (1 key, 2 move, 3 click, 4 wheel), virtual key, x, y, wheel delta
+    public static int[] Read() {
+        IntPtr input = GetStdHandle(-10);
+        Record[] records = new Record[1];
+        uint read;
+        while (true) {
+            if (!ReadConsoleInputW(input, records, 1, out read)) throw new Win32Exception();
+            Record r = records[0];
+            if (read == 0) continue;
+            if (r.Type == 1 && r.KeyDown != 0) return new int[] { 1, r.VirtualKey, 0, 0, 0 };
+            if (r.Type != 2) continue;
+            if (r.Flags == 1) return new int[] { 2, 0, r.X, r.Y, 0 };
+            if (r.Flags == 0 && (r.Buttons & 1) != 0) return new int[] { 3, 0, r.X, r.Y, 0 };
+            if (r.Flags == 4) return new int[] { 4, 0, r.X, r.Y, ((int)r.Buttons) >> 16 };
+        }
     }
 }
+'@
 
-function Select-Item([string[]]$Items, [string]$Title, [string[]]$Hints = @(), [int]$Default = 0) {
+function Initialize-Input {
+    if ($null -eq $script:InputReady) {
+        try {
+            if (-not ('EspFlasherInput' -as [type])) { Add-Type -TypeDefinition $ConsoleInputSource }
+            $script:InputReady = $true
+        } catch {
+            $script:InputReady = $false
+        }
+    }
+    $script:InputReady
+}
+
+function Enable-Mouse {
+    if ($Interactive -and (Initialize-Input)) { [EspFlasherInput]::Enable() }
+}
+
+function Restore-Mouse($Mode) {
+    if ($null -ne $Mode) { [EspFlasherInput]::Restore($Mode) }
+}
+
+# keys come back as ConsoleKey, which follows key position, so letters work on any layout
+function Read-Input {
+    if ($Interactive -and (Initialize-Input)) {
+        $e = [EspFlasherInput]::Read()
+        $kind = ('', 'key', 'move', 'click', 'wheel')[$e[0]]
+        $key = if ($kind -eq 'key') { [ConsoleKey]$e[1] } else { $null }
+        return [pscustomobject]@{ Kind = $kind; Key = $key; X = $e[2]; Y = $e[3]; Delta = $e[4] }
+    }
+    $info = [Console]::ReadKey($true)
+    [pscustomobject]@{ Kind = 'key'; Key = $info.Key; X = 0; Y = 0; Delta = 0 }
+}
+
+# a list driven by arrows, wheel, mouse hover and click, or each row's key; returns the row index
+function Select-Item {
+    param(
+        [string[]]$Items,
+        [string]$Title = '',
+        [string[]]$Hints = @(),
+        [int]$Default = 0,
+        [string[]]$Keys = @(),
+        [string[]]$Colors = @(),
+        [int]$Escape = -1,
+        [ConsoleColor]$TitleColor = 'White',
+        [switch]$Always
+    )
     if (-not $Items) { Fail 'nothing to choose from' }
-    if ($Items.Count -eq 1) { return $Items[0] }
+    if ($Items.Count -eq 1 -and -not $Always) { return 0 }
+    if (-not $Keys) { $Keys = @(1..$Items.Count | ForEach-Object { if ($_ -le 9) { "$_" } else { '' } }) }
     $cleared = $LiveOpen
     Clear-Live
 
     if (-not $Interactive) {
-        Write-Ui "  $Title"
-        for ($i = 0; $i -lt $Items.Count; $i++) { Write-Ui "    $($i + 1). $($Items[$i])  $($Hints[$i])" }
+        if ($Title) { Write-Ui "  $Title" }
+        for ($i = 0; $i -lt $Items.Count; $i++) { Write-Ui "    $($Keys[$i])  $($Items[$i])  $($Hints[$i])" }
         while ($true) {
-            $raw = Read-Line "  [1-$($Items.Count)]: "
-            if ($raw -match '^\d+$' -and [int]$raw -ge 1 -and [int]$raw -le $Items.Count) { return $Items[[int]$raw - 1] }
+            $index = [array]::IndexOf($Keys, (Read-Line '  > ').ToLower())
+            if ($index -ge 0) { return $index }
         }
     }
 
     $width = ($Items | Measure-Object -Property Length -Maximum).Maximum
+    $keyWidth = ($Keys | Measure-Object -Property Length -Maximum).Maximum + 2
     # a cleared status line already leaves the gap above the menu
     $start = Get-Row
     if (-not $cleared) { Write-Ui }
-    Write-Line @('  ', 'Gray', $Title, 'White', '     ', 'Gray', "$($G.Up)$($G.Down)", 'Cyan', ' move   ', 'DarkGray',
-        'enter', 'Cyan', ' choose   ', 'DarkGray', 'esc', 'Cyan', ' quit', 'DarkGray')
+    if ($Title) { Write-Line @('  ', 'Gray', $Title, $TitleColor) }
     $selected = [math]::Max(0, [math]::Min($Default, $Items.Count - 1))
+    $drawn = -1
     $top = -1
-    while ($true) {
-        if ($top -ge 0) { [Console]::SetCursorPosition(0, $top) }
-        for ($i = 0; $i -lt $Items.Count; $i++) {
-            $hint = if ($i -lt $Hints.Count) { $Hints[$i] } else { '' }
-            if ($i -eq $selected) {
-                Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "$($i + 1)  ", 'DarkGray', $Items[$i].PadRight($width), 'White', "   $hint", 'Gray')
-            } else {
-                Write-Line @('    ', 'Gray', "$($i + 1)  ", 'DarkGray', $Items[$i].PadRight($width), 'Gray', "   $hint", 'DarkGray')
+    $chosen = -1
+    $mode = Enable-Mouse
+    try {
+        while ($chosen -lt 0) {
+            if ($selected -ne $drawn) {
+                if ($top -ge 0) { [Console]::SetCursorPosition(0, $top) }
+                for ($i = 0; $i -lt $Items.Count; $i++) {
+                    $hint = if ($i -lt $Hints.Count) { $Hints[$i] } else { '' }
+                    $color = if ($i -lt $Colors.Count -and $Colors[$i]) { $Colors[$i] } else { $null }
+                    if ($i -eq $selected) {
+                        Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', $Keys[$i].PadRight($keyWidth), 'Cyan',
+                            $Items[$i].PadRight($width), $(if ($color) { $color } else { 'White' }), "   $hint", 'Gray')
+                    } else {
+                        Write-Line @('    ', 'Gray', $Keys[$i].PadRight($keyWidth), 'DarkGray',
+                            $Items[$i].PadRight($width), $(if ($color) { $color } else { 'Gray' }), "   $hint", 'DarkGray')
+                    }
+                }
+                Write-Line @('    ', 'Gray', "$($G.Up)$($G.Down)", 'DarkCyan', ' or mouse   ', 'DarkGray',
+                    'enter', 'DarkCyan', ' choose   ', 'DarkGray', 'esc', 'DarkCyan', $(if ($Escape -ge 0) { ' back' } else { ' quit' }), 'DarkGray')
+                if ($top -lt 0) { $top = [Console]::CursorTop - $Items.Count - 1 }
+                $drawn = $selected
+            }
+
+            $e = Read-Input
+            $row = $e.Y - $top
+            $onItem = $e.Kind -ne 'key' -and $row -ge 0 -and $row -lt $Items.Count
+            if ($e.Kind -eq 'move' -and $onItem) { $selected = $row }
+            elseif ($e.Kind -eq 'click' -and $onItem) { $chosen = $row }
+            elseif ($e.Kind -eq 'wheel') {
+                $step = if ($e.Delta -gt 0) { -1 } else { 1 }
+                $selected = ($selected + $step + $Items.Count) % $Items.Count
+            }
+            elseif ($e.Kind -eq 'key') {
+                $name = "$($e.Key)".ToLower() -replace '^(?:d|numpad)(\d)$', '$1'
+                if ($e.Key -eq 'UpArrow') { $selected = ($selected + $Items.Count - 1) % $Items.Count }
+                elseif ($e.Key -eq 'DownArrow') { $selected = ($selected + 1) % $Items.Count }
+                elseif ($e.Key -eq 'Home') { $selected = 0 }
+                elseif ($e.Key -eq 'End') { $selected = $Items.Count - 1 }
+                elseif ($e.Key -eq 'Enter') { $chosen = $selected }
+                elseif ($e.Key -eq 'Escape') {
+                    if ($Escape -lt 0) { Clear-Since $start; Fail 'cancelled' }
+                    $chosen = $Escape
+                }
+                elseif ($Keys -contains $name) { $chosen = [array]::IndexOf($Keys, $name) }
             }
         }
-        if ($top -lt 0) { $top = [Console]::CursorTop - $Items.Count }
-        $key = Read-Key
-        if ($key.Key -eq 'UpArrow') { $selected = ($selected + $Items.Count - 1) % $Items.Count; continue }
-        if ($key.Key -eq 'DownArrow') { $selected = ($selected + 1) % $Items.Count; continue }
-        if ($key.Key -eq 'Escape') { Clear-Since $start; Fail 'cancelled' }
-        if ($key.Key -eq 'Enter') { break }
-        if ("$($key.Key)" -match '^(?:D|NumPad)([1-9])$' -and [int]$Matches[1] -le $Items.Count) {
-            $selected = [int]$Matches[1] - 1
-            break
-        }
+    } finally {
+        Restore-Mouse $mode
     }
     Clear-Since $start
-    $Items[$selected]
+    $chosen
 }
 
 function Format-Size([double]$Bytes) {
@@ -539,8 +647,9 @@ function Select-Port {
             "this board exposes only its firmware serial port`n" +
             'hold BOOT, tap RESET, release BOOT and run again')
     }
-    $port = Select-Item $usable 'which board?' $hints
-    Write-Step ok 'port' $port -Detail $hints[[array]::IndexOf($usable, $port)]
+    $index = Select-Item $usable 'which board?' $hints
+    $port = $usable[$index]
+    Write-Step ok 'port' $port -Detail $hints[$index]
     if ($skipped) { Write-Note ($skipped -join "`n") }
     $port
 }
@@ -708,8 +817,7 @@ function Select-Variant($Builds, [string]$Current = '', [string]$Guess = '') {
             $hint
         })
     $default = [array]::IndexOf($keys, $Current)
-    $chosen = Select-Item $names 'which build?' $hints $default
-    $keys[[array]::IndexOf($names, $chosen)]
+    $keys[(Select-Item $names 'which build?' $hints $default)]
 }
 
 function Get-Firmware([string]$Url, [string]$Name) {
@@ -758,7 +866,31 @@ function Write-Plan([string]$Board, [string]$Variant, $Build, [string]$Current, 
             $(if ($cached) { 'cached' } else { 'will be downloaded' }), 'Gray')
         , @()
     )
-    Write-Ui
+}
+
+# the actions under the plan: what each does, its key, and the code Main acts on
+function Select-Action($Build, $Builds) {
+    $items = @("flash $($Build.Version)", 'erase + flash')
+    $hints = @('keeps the files on the board', 'wipes the whole chip, files included')
+    $keys = @('f', 'e')
+    $colors = @('', 'Yellow')
+    if ($Builds.Count -gt 1) {
+        $items += 'other build'
+        $hints += (@($Builds.Keys | Sort-Object | ForEach-Object { if ($_) { $_ } else { 'base' } }) -join ', ')
+        $keys += 'v'
+        $colors += ''
+    }
+    $items += @('check online', 'quit')
+    $hints += @('look for a newer release on micropython.org', 'leave the board as it is')
+    $keys += @('u', 'q')
+    $colors += @('', '')
+    $keys[(Select-Item $items '' $hints 0 $keys $colors -Escape ($items.Count - 1) -Always)]
+}
+
+function Confirm-Erase {
+    $answer = Select-Item @('no, go back', 'yes, erase everything') 'erase the whole chip, files on the board included?' `
+        @('', '') 0 @('n', 'y') @('', 'Yellow') -Escape 0 -TitleColor Yellow -Always
+    $answer -eq 1
 }
 
 
@@ -805,6 +937,7 @@ function Main {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     Write-Title
+    Initialize-Input | Out-Null
     Initialize-Esptool
     $port = Select-Port
 
@@ -835,21 +968,15 @@ function Main {
         $top = Get-Row
         $build = $builds[$variant]
         Write-Plan $board $variant $build $currentVersion $chip.Name
-        $keys = @('enter', 'flash', 'e', 'erase + flash')
-        if ($builds.Count -gt 1) { $keys += @('v', 'variant') }
-        $keys += @('u', 'check online', 'q', 'quit')
-        $menuTop = Get-Row
-        Write-Keys $keys
-        $answer = Read-Action @('e', 'v', 'u', 'q')
+        $answer = Select-Action $build $builds
         if ($answer -eq 'q') {
-            Clear-Since $menuTop
+            Write-Ui
             Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'quit, nothing written', 'DarkGray')
             return
         }
         if ($answer -eq 'e') {
-            Write-Line @('  ', 'Gray', 'erase the whole chip, files on the board included?   ', 'Yellow', 'y', 'Cyan', ' yes   ', 'DarkGray', 'n', 'Cyan', ' no', 'DarkGray')
-            if ((Read-Key).Key -eq 'Y') {
-                Clear-Since $menuTop
+            if (Confirm-Erase) {
+                Write-Ui
                 Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Yellow', 'erase + flash', 'White')
                 break
             }
@@ -867,8 +994,8 @@ function Main {
             $variant = Select-Variant $builds $variant $guess
             continue
         }
-        Clear-Since $menuTop
-        Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', 'flash', 'White')
+        Write-Ui
+        Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Cyan', "flash $($build.Version)", 'White')
         break
     }
     Write-Ui

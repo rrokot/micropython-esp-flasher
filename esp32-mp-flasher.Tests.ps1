@@ -137,7 +137,7 @@ Test 'offline main can flash when only octal variant is cached' {
     function Get-PortLabel { 'test adapter' }
     function Read-Banner { '' }
     function Get-Chip { [pscustomobject]@{ Name = 'ESP32-S3'; PsramMb = 0; FlashSize = '8MB' } }
-    function Read-Action { '' }
+    function Select-Item { 0 }
     function Get-PortSnapshot { 'COM5' }
     function Wait-Board { 'COM5' }
     function Start-Sleep {}

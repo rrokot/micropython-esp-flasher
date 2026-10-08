@@ -37,19 +37,25 @@ prints what it is about to do and waits:
   │                                                            │
   └────────────────────────────────────────────────────────────┘
 
-  enter flash   e erase + flash   v variant   u check online   q quit
+  ► f  flash 1.29.0    keeps the files on the board
+    e  erase + flash   wipes the whole chip, files included
+    v  other build     base, SPIRAM_OCT
+    u  check online    look for a newer release on micropython.org
+    q  quit            leave the board as it is
+    ↑↓ or mouse   enter choose   esc back
 ```
 
-Keys act on a single press, no `enter` needed, and work on any keyboard layout.
-`e` wipes the whole chip, including the filesystem, and asks for `y` first.
-Plain `enter` leaves the filesystem partition alone, so `boot.py` and the rest
-of the device files survive. `v` lists the available variants in case the guess
-is wrong. `u` checks the website for the latest stable releases before you
-confirm flashing. While esptool works, a progress bar replaces its output; if it
-fails, the tail of that output is shown with the error.
+Every list, this one included, works with the arrows or the mouse wheel, by
+hovering and clicking, or by pressing the row's key. Keys act on a single
+press and work on any keyboard layout. `flash` leaves the filesystem partition
+alone, so `boot.py` and the rest of the device files survive. `erase + flash`
+wipes the whole chip, including the filesystem, and asks again first.
+`other build` lists the available variants in case the guess is wrong.
+`check online` looks for the latest stable releases on the website. While
+esptool works, a progress bar replaces its output; if it fails, the tail of
+that output is shown with the error.
 
-With more than one board plugged in it shows a list to pick from with the arrow
-keys or the number.
+With more than one board plugged in, the same kind of list asks which one.
 
 ## How the variant is chosen
 
