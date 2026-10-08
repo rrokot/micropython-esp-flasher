@@ -19,8 +19,8 @@ For each board it finds, it picks the build the hardware needs and counts down
   base build on a module with octal PSRAM): flashes it;
 - already the latest, right build: leaves it alone.
 
-Files on the board are kept. When the new build would keep them elsewhere, they
-are copied to the `backups` folder first, and put back once it runs.
+Files on the board are kept. If the new build would keep them elsewhere and so
+lose them, it asks first: cancel, or erase + flash.
 
 Press any key or click during the countdown for a menu: `flash`,
 `erase + flash` (wipes the files too), `other build`, `skip`. Arrows, mouse or

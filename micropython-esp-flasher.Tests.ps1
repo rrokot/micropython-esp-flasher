@@ -135,14 +135,12 @@ function New-Port([string]$Device, [int]$VendorId, [int]$ProductId) {
 
 # runs Main against ESP32-S3 boards running MicroPython $Running (empty: none) as build $Build, with
 # $PsramMb of embedded PSRAM; $Chips maps each port with a chip behind it to that chip's MAC, and
-# the new image keeps its files at $NewFs. returns the flash calls, the preselected menu rows and
-# the file copies made around them
+# the new image keeps its files at $NewFs. returns the flash calls and the preselected menu rows
 function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports = @(New-Port 'COM5' 0x10C4 0xEA60),
         [hashtable]$Chips = @{ COM5 = 'aa:00:00:00:00:01' }, [string]$FailOn = '', [switch]$Interrupt,
         [string]$Build = 'ESP32_GENERIC_S3', [int]$PsramMb = 0, [long]$NewFs = 0x200000, [long]$FirmwarePsram = 0) {
     $flashed = New-Object System.Collections.Generic.List[object]
     $menus = New-Object System.Collections.Generic.List[string]
-    $copies = New-Object System.Collections.Generic.List[string]
     function Initialize-Esptool {}
     function Get-SerialPorts { $Ports }
     function Read-Board {
@@ -156,8 +154,6 @@ function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports
         if (-not $Optional) { throw "no chip on $Port" }
     }
     function Get-FsStart { $NewFs }
-    function Save-BoardFiles($Port, $Folder) { $copies.Add("save $Port"); @([pscustomobject]@{ Dir = $false; Size = 10; Path = '/main.py' }) }
-    function Restore-BoardFiles($Port, $Folder, $Files) { $copies.Add("restore $Port") }
     function Wait-Countdown { [bool]$Interrupt }
     function Select-Item([string[]]$Items, $Title, $Hints, [int]$Default) {
         if ($Items.Count -eq 1) { return 0 }
@@ -171,11 +167,10 @@ function Invoke-MainOn([string]$Running, [string[]]$Menu = @(), [object[]]$Ports
     function Save-Url { throw 'network request' }
     function Invoke-Flash($Port, $Chip, $Path, $Erase) {
         if ($Port -eq $FailOn) { Fail "write failed on $Port" }
-        $copies.Add("flash $Port")
         $flashed.Add(@($Port, $Chip, $Path, $Erase)); 115200
     }
     Main
-    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus; Failures = $BoardFailures; Closed = $Closed; Copies = $copies }
+    [pscustomobject]@{ Flashed = $flashed; Defaults = $menus; Failures = $BoardFailures; Closed = $Closed }
 }
 
 Test 'offline main can flash when only octal variant is cached' {
@@ -226,18 +221,20 @@ Test 'a wrong build is replaced by the one the hardware needs' {
     Assert-Equal 0 $run.Flashed.Count 'a board build that is not ours names no variant to judge'
 }
 
-Test 'files are copied off and put back only when the new build keeps them elsewhere' {
+Test 'files the new build would lose are wiped or kept by the user''s choice' {
     Store $BaseBuild | Out-Null
-    Store $Octal | Out-Null
-    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">x</a><a href=`"/resources/firmware/$Octal`">x</a>" }
+    function Get-WebText { "<a href=`"/resources/firmware/$BaseBuild`">x</a>" }
     $run = Invoke-MainOn '1.25.0'
-    Assert-Equal 'flash COM5' ($run.Copies -join ', ') 'same place, no copy'
-    $run = Invoke-MainOn '1.25.0' -NewFs 0x300000
-    Assert-Equal 'save COM5, flash COM5, restore COM5' ($run.Copies -join ', ') 'moved: copied off, flashed, put back'
+    Assert-Equal 'False' "$($run.Flashed[0][3])" 'files stay where they are: flashed, no question'
+    $run = Invoke-MainOn '1.25.0' @('cancel') -NewFs 0x300000
+    Assert-Equal 'cancel' $run.Defaults[0] 'cancel is what Enter does'
+    Assert-Equal 0 $run.Flashed.Count 'cancelled: nothing written'
+    $run = Invoke-MainOn '1.25.0' @('erase + flash') -NewFs 0x300000
+    Assert-Equal 'True' "$($run.Flashed[0][3])" 'erase + flash chosen'
     $run = Invoke-MainOn '' -NewFs 0x300000
-    Assert-Equal 'flash COM5' ($run.Copies -join ', ') 'no MicroPython, no files'
+    Assert-Equal 'False' "$($run.Flashed[0][3])" 'no MicroPython, no files to lose'
     $run = Invoke-MainOn '1.25.0' @('erase + flash', 'yes, erase everything') -Interrupt -NewFs 0x300000
-    Assert-Equal 'flash COM5' ($run.Copies -join ', ') 'erase + flash wipes them on purpose'
+    Assert-Equal '2 True' "$($run.Defaults.Count) $($run.Flashed[0][3])" 'erase already chosen: not asked again'
 }
 
 Test 'whether the files move is told by the filesystem start, or the variant without a table' {
@@ -464,25 +461,15 @@ Test 'images are written where they belong, esp8266 with the flash size detected
     Assert-Equal 0 $calls.Count 'nothing erased when the image cannot be placed'
 }
 
-function ConvertTo-Hex([string]$Text) {
-    -join ([System.Text.Encoding]::UTF8.GetBytes($Text) | ForEach-Object { '{0:x2}' -f $_ })
-}
-
-function ConvertFrom-Hex([string]$Hex) {
-    $bytes = [byte[]]@(for ($i = 0; $i -lt $Hex.Length; $i += 2) { [Convert]::ToByte($Hex.Substring($i, 2), 16) })
-    [System.Text.Encoding]::UTF8.GetString($bytes)
-}
-
 # a board behind a serial port. it is still booting through $Boot, a chunk per read, and only
-# then answers Ctrl-C with a prompt; -Silent never does. in the raw REPL it runs the flasher's
-# code by what that code asks for, over a filesystem of path -> bytes in $Files
-function New-FakeBoard([string[]]$Boot = @(), [hashtable]$Files = @{}, [switch]$Silent, [int]$FailAt = 0, [switch]$NoPaste,
+# then answers Ctrl-C with a prompt; -Silent never does. in the raw REPL it answers the probe,
+# in raw-paste mode unless -NoPaste, as a board before MicroPython 1.14
+function New-FakeBoard([string[]]$Boot = @(), [switch]$Silent, [switch]$NoPaste,
         [string]$Probe = "version=1.29.0`r`nmachine=Generic ESP32S3 module with ESP32S3`r`nbuild=ESP32_GENERIC_S3`r`npsram=0`r`nfs=2097152`r`n") {
-    $state = @{ Boot = [System.Collections.Queue]::new([object[]]$Boot); Out = ''; Raw = $false; Code = ''; Open = $null
-        Sent = New-Object System.Collections.Generic.List[byte]; Files = $Files; Closed = $false; Execs = 0; FailAt = $FailAt
-        Paste = $false; Ask = 0; Taken = 0 }
+    $state = @{ Boot = [System.Collections.Queue]::new([object[]]$Boot); Out = ''; Raw = $false; Code = ''
+        Sent = New-Object System.Collections.Generic.List[byte]; Paste = $false; Ask = 0; Taken = 0 }
     $board = [pscustomobject]@{ State = $state; Probe = $Probe; Silent = [bool]$Silent; NoPaste = [bool]$NoPaste }
-    $board | Add-Member ScriptMethod Close { $this.State.Closed = $true }
+    $board | Add-Member ScriptMethod Close {}
     $board | Add-Member ScriptProperty BytesToRead { $this.State.Out.Length }
     $board | Add-Member ScriptMethod ReadByte {
         $b = [int]$this.State.Out[0]
@@ -491,11 +478,7 @@ function New-FakeBoard([string[]]$Boot = @(), [hashtable]$Files = @{}, [switch]$
     }
     # what running code sends back: its output, Ctrl-D, its error, Ctrl-D, the raw prompt
     $board | Add-Member ScriptMethod Answer {
-        $s = $this.State
-        $s.Execs++
-        # -FailAt: that piece of code is cut short, as by a stray Ctrl-C after a reset
-        if ($s.Execs -eq $s.FailAt) { return [string][char]4 + 'KeyboardInterrupt: ' + [char]4 + '>' }
-        $this.Run($s.Code) + [char]4 + [char]4 + '>'
+        $(if ($this.State.Code -match 'idf_heap_info') { $this.Probe } else { '' }) + [char]4 + [char]4 + '>'
     }
     $board | Add-Member ScriptMethod Write {
         param($Data, $Offset, $Count)
@@ -535,29 +518,6 @@ function New-FakeBoard([string[]]$Boot = @(), [hashtable]$Files = @{}, [switch]$
         $this.State.Out = ''
         $out
     }
-    $board | Add-Member ScriptMethod Run {
-        param([string]$Code)
-        $s = $this.State
-        $path = if ($Code -match "unhexlify\('([0-9a-f]+)'\)") { ConvertFrom-Hex $Matches[1] }
-        if ($Code -match 'idf_heap_info') { return $this.Probe }
-        if ($Code -match 'ilistdir') {
-            $dirs = @($s.Files.Keys | ForEach-Object { $p = $_; while (($p = $p -replace '/[^/]*$', '') ) { $p } } | Sort-Object -Unique)
-            $lines = @($dirs | ForEach-Object { "d 0 $(ConvertTo-Hex $_)" }) +
-                @($s.Files.Keys | Sort-Object | ForEach-Object { "f $($s.Files[$_].Length) $(ConvertTo-Hex $_)" })
-            return ($lines -join "`r`n") + "`r`n"
-        }
-        if ($Code -match 'b2a_base64') {
-            $data = [byte[]]$s.Files[$path]
-            $out = ''
-            for ($i = 0; $i -lt $data.Length; $i += 512) {
-                $out += [Convert]::ToBase64String($data, $i, [math]::Min(512, $data.Length - $i)) + "`r`n"
-            }
-            return $out
-        }
-        if ($Code -match "open\(.*'wb'\)") { $s.Open = $path; $s.Files[$path] = [byte[]]@(); return '' }
-        if ($Code -match "a2b_base64\('([^']*)'\)") { $s.Files[$s.Open] = [byte[]]($s.Files[$s.Open] + [Convert]::FromBase64String($Matches[1])); return '' }
-        ''
-    }
     $board
 }
 
@@ -589,25 +549,6 @@ Test 'what the board says of itself is read' {
         "$($facts.Version)|$($facts.Machine)|$($facts.Build)|$($facts.Psram)|$($facts.Fs)" 'esp32'
     $facts = ConvertFrom-Probe "version=1.22.0`r`nmachine=ESP module with ESP8266`r`nbuild=`r`nfs=1048576`r`n"
     Assert-Equal '1.22.0|ESP module||0|1048576' "$($facts.Version)|$($facts.Machine)|$($facts.Build)|$($facts.Psram)|$($facts.Fs)" 'esp8266 before 1.24'
-}
-
-Test 'files go off the board and back unchanged' {
-    function Start-Sleep {}
-    $blob = [byte[]](0..255) * 12
-    $files = @{ '/boot.py' = [System.Text.Encoding]::UTF8.GetBytes("import app`r`n"); '/lib/app.mpy' = $blob
-        ('/data/n' + [char]0x00E4 + 'me 1.txt') = [System.Text.Encoding]::UTF8.GetBytes('x') }
-    $old = New-FakeBoard -Files $files -FailAt 3
-    $new = New-FakeBoard -FailAt 6
-    $script:boards = [System.Collections.Queue]::new(@($old, $new))
-    function Open-SerialPort { $script:boards.Dequeue() }
-    $folder = Join-Path $Cache 'backup'
-    $saved = @(Save-BoardFiles 'COM5' $folder)
-    Assert-Equal 3 @($saved | Where-Object { -not $_.Dir }).Count 'files listed'
-    Assert-Equal ($blob.Length) (Get-Item -LiteralPath (Join-Path $folder 'lib\app.mpy')).Length 'binary copied whole'
-    Restore-BoardFiles 'COM5' $folder $saved
-    foreach ($path in $files.Keys) {
-        Assert-Equal ([Convert]::ToBase64String($files[$path])) ([Convert]::ToBase64String([byte[]]$new.State.Files[$path])) "$path back unchanged"
-    }
 }
 
 Test 'a run is logged in full, and old logs are pruned' {

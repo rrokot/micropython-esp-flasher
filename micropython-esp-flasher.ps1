@@ -69,7 +69,6 @@ $Inv = [System.Globalization.CultureInfo]::InvariantCulture
 $LiveOpen = $false
 
 $LogDir = Join-Path $PSScriptRoot 'logs'
-$BackupDir = Join-Path $PSScriptRoot 'backups'
 $LogKeep = 30
 $LogPath = $null
 $LogMuted = $false
@@ -969,20 +968,6 @@ function Invoke-Repl($Serial, [string]$Code, [int]$Patience = 5000) {
     $m.Groups[1].Value
 }
 
-# a board that resets or takes a stray Ctrl-C right after booting loses the code it was given:
-# $Body runs again, on a fresh prompt, up to three times
-function Invoke-Patiently($Serial, [string]$What, [scriptblock]$Body) {
-    for ($try = 1; ; $try++) {
-        try {
-            return & $Body
-        } catch {
-            if ($try -ge 3) { throw }
-            Write-Log "$What failed, trying again: $($_.Exception.Message)`n$([string]$_.Exception.Data['details'])"
-            if (-not (Connect-Repl $Serial 10000)) { Fail "the board stopped answering during $What" }
-        }
-    }
-}
-
 # Ctrl-B leaves the raw REPL, Ctrl-D soft resets, so the code Ctrl-C stopped runs again
 function Disconnect-Repl($Serial) {
     try { $Serial.Write([byte[]](2, 4), 0, 2); Start-Sleep -Milliseconds 100 } finally { $Serial.Close() }
@@ -1034,112 +1019,6 @@ function Read-Board([string]$Port, [int]$Patience = 3000) {
     } catch {
         Write-Log "board on ${Port}: $($_.Exception.Message)`n$([string]$_.Exception.Data['details'])"
         $null
-    }
-}
-
-# every file on the board: kind, size, path; paths travel as hex, so any name survives
-$ListFiles = @'
-import os, binascii
-def walk(d):
-    for e in os.ilistdir(d):
-        p = d.rstrip('/') + '/' + e[0]
-        if e[1] == 0x4000:
-            print('d 0', binascii.hexlify(p.encode()).decode())
-            walk(p)
-        else:
-            print('f', os.stat(p)[6], binascii.hexlify(p.encode()).decode())
-walk('/')
-'@
-
-function Get-BoardFiles($Serial) {
-    foreach ($line in (Invoke-Repl $Serial $ListFiles 20000) -split "`r?`n") {
-        $kind, $size, $hex = $line.Trim() -split ' ', 3
-        if (-not $hex) { continue }
-        $bytes = [byte[]]@(for ($i = 0; $i -lt $hex.Length; $i += 2) { [Convert]::ToByte($hex.Substring($i, 2), 16) })
-        [pscustomobject]@{
-            Dir = $kind -eq 'd'; Size = [long]$size; Path = [System.Text.Encoding]::UTF8.GetString($bytes); Hex = $hex
-        }
-    }
-}
-
-# copies every file off the board into $Folder and returns the list of what it holds
-function Save-BoardFiles([string]$Port, [string]$Folder) {
-    $serial = Open-SerialPort $Port
-    try {
-        if (-not (Connect-Repl $serial)) { Fail "no MicroPython prompt on $Port to copy the files from" }
-        $files = @(Invoke-Patiently $serial 'listing the files' { Get-BoardFiles $serial })
-        $total = ($files | Measure-Object Size -Sum).Sum
-        $done = 0
-        $frame = 0
-        foreach ($file in $files) {
-            $local = Join-Path $Folder ($file.Path.TrimStart('/') -replace '/', '\')
-            if ($file.Dir) { New-Item -ItemType Directory -Force -Path $local | Out-Null; continue }
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $local) | Out-Null
-            $code = "import binascii`nwith open(binascii.unhexlify('$($file.Hex)').decode(), 'rb') as f:`n" +
-                "    while True:`n        b = f.read(512)`n        if not b:`n            break`n" +
-                "        print(binascii.b2a_base64(b).decode().strip())`n"
-            $text = Invoke-Patiently $serial "copying $($file.Path)" { Invoke-Repl $serial $code (10000 + $file.Size / 5) }
-            $data = [System.IO.MemoryStream]::new()
-            foreach ($chunk in $text -split "`r?`n" | Where-Object { $_ }) {
-                $part = [Convert]::FromBase64String($chunk.Trim())
-                $data.Write($part, 0, $part.Length)
-            }
-            if ($data.Length -ne $file.Size) { Fail "copying $($file.Path) gave $($data.Length) of $($file.Size) bytes" }
-            [System.IO.File]::WriteAllBytes($local, $data.ToArray())
-            $done += $file.Size
-            Write-Activity 'files' "$(Format-Size $done) of $(Format-Size $total)" $frame ($done / [math]::Max(1, $total)) -Bar
-            $frame++
-        }
-        Write-Log "copied off ${Port}:`n$(@($files | ForEach-Object { "$($_.Size) $($_.Path)" }) -join "`n")"
-        $files
-    } finally {
-        Disconnect-Repl $serial
-    }
-}
-
-# writes $Files back from $Folder, then lists the board again to check every one arrived whole
-function Restore-BoardFiles([string]$Port, [string]$Folder, $Files) {
-    $serial = Open-SerialPort $Port
-    try {
-        # a fresh filesystem is formatted on the first boot, which takes a moment longer
-        if (-not (Connect-Repl $serial 10000)) { Fail "no MicroPython prompt on $Port to put the files back" }
-        $total = ($Files | Measure-Object Size -Sum).Sum
-        $done = 0
-        foreach ($file in $Files) {
-            $name = "binascii.unhexlify('$($file.Hex)').decode()"
-            if ($file.Dir) {
-                Invoke-Patiently $serial "making $($file.Path)" {
-                    Invoke-Repl $serial "import os, binascii`ntry:`n    os.mkdir($name)`nexcept OSError:`n    pass`n"
-                } | Out-Null
-                continue
-            }
-            $bytes = [System.IO.File]::ReadAllBytes((Join-Path $Folder ($file.Path.TrimStart('/') -replace '/', '\')))
-            # writing flash stalls the chip long enough for its UART to drop what arrives meanwhile,
-            # so the data gathers in memory while it is sent, and goes to the file every five
-            # pieces, 7.5KB, in code of its own that runs while nothing is sent. a retry starts over
-            $pieces = [math]::Ceiling($bytes.Length / 1536)
-            Invoke-Patiently $serial "writing $($file.Path)" {
-                Invoke-Repl $serial "import binascii`nf = open($name, 'wb')`nb = bytearray()`n" | Out-Null
-                for ($k = 0; $k -lt $pieces; $k++) {
-                    $chunk = [Convert]::ToBase64String($bytes, $k * 1536, [math]::Min(1536, $bytes.Length - $k * 1536))
-                    Invoke-Repl $serial "b.extend(binascii.a2b_base64('$chunk'))`n" | Out-Null
-                    if ($k % 5 -eq 4 -or $k -eq $pieces - 1) { Invoke-Repl $serial "f.write(b)`nb = bytearray()`n" | Out-Null }
-                    $sent = $done + [math]::Min(($k + 1) * 1536, $bytes.Length)
-                    Write-Activity 'files' "$(Format-Size $sent) of $(Format-Size $total)" $k ($sent / [math]::Max(1, $total)) -Bar
-                }
-                Invoke-Repl $serial "f.close()`n" | Out-Null
-            }
-            $done += $bytes.Length
-        }
-        $now = @(Invoke-Patiently $serial 'listing the files' { Get-BoardFiles $serial })
-        foreach ($file in $Files) {
-            $back = $now | Where-Object { $_.Path -eq $file.Path } | Select-Object -First 1
-            if (-not $back -or (-not $file.Dir -and $back.Size -ne $file.Size)) {
-                Fail "$($file.Path) did not come back whole; the copy is in $Folder"
-            }
-        }
-    } finally {
-        Disconnect-Repl $serial
     }
 }
 
@@ -1274,7 +1153,7 @@ function Format-Variant([string]$Variant) {
 
 # whether flashing moves the files: the new firmware's filesystem starts elsewhere than the one
 # on the board. an ESP8266 image has no table to read, so there a change of variant moves them,
-# and when nothing tells, they are taken to move: the cost of being wrong is only a copy
+# and when nothing tells, they are taken to move: the cost of being wrong is only a question
 function Test-FilesMove([string]$Chip, [string]$Path, $Running, $RunningVariant, [string]$Variant) {
     $new = Get-FsStart $Chip $Path
     if ($null -ne $new -and $null -ne $Running.Fs) { return $new -ne $Running.Fs }
@@ -1522,16 +1401,21 @@ function Update-Board($Target, $Catalog) {
     Write-Ui
 
     $path = Get-Firmware $build.Url $build.Name
-    # erase + flash wipes the files on purpose; otherwise, when the new build keeps them
-    # elsewhere, they are copied off first and put back once it runs
-    $backup = $null
-    if ($Target.Running -and $answer -ne 'e' -and (Test-FilesMove $chip.Name $path $Target.Running $running $variant)) {
-        $copy = "$($chip.Mac -replace ':', '-')\$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss', $Inv))"
-        $backup = Join-Path $BackupDir $copy
-        $files = @(Save-BoardFiles $port $backup)
-        $count = @($files | Where-Object { -not $_.Dir }).Count
-        $size = Format-Size ($files | Measure-Object Size -Sum).Sum
-        Write-Step ok 'files' "$count files, $size copied" -Detail "the new build keeps them elsewhere $($G.Mid) backups\$copy"
+    # a build that keeps its files elsewhere would lose the ones on the board: only the user
+    # can choose between wiping them and leaving the board as it is
+    if ($answer -eq 'f' -and $Target.Running -and (Test-FilesMove $chip.Name $path $Target.Running $running $variant)) {
+        $choice = Select-Item @('cancel', 'erase + flash') 'the new build keeps files elsewhere: the files on the board would be lost' `
+            @('leave the board as it is', 'wipes the whole chip, files included') 0 @('c', 'e') @('', 'Yellow') `
+            -Escape 0 -EscapeHint 'cancel' -TitleColor Yellow -Always
+        Write-Ui
+        if ($choice -eq 0) {
+            Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'DarkGray', 'cancelled, nothing written', 'DarkGray')
+            $result.Outcome = 'skipped'
+            return $result
+        }
+        Write-Line @('  ', 'Gray', "$($G.Pointer) ", 'Yellow', 'erase + flash', 'White')
+        Write-Ui
+        $answer = 'e'
     }
     $before = Get-PortSnapshot
     $baud = Invoke-Flash $port $chip.Name $path ($answer -eq 'e')
@@ -1542,10 +1426,6 @@ function Update-Board($Target, $Catalog) {
     $result.Outcome = 'flashed'
     $result.To = $build.Version
     $result | Add-Member Done (@{ install = 'installed'; update = 'updated'; 'wrong build' = 'build fixed' }[$change])
-    if ($backup) {
-        Restore-BoardFiles $port $backup $files
-        Write-Step ok 'files' "$count files, $size put back" -Detail 'every size checked'
-    }
 
     Write-Step wait 'repl' 'listening' -Live
     $running = Read-Board $port
