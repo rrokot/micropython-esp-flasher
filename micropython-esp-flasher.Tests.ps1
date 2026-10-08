@@ -262,7 +262,7 @@ Test 'a failed board does not stop the others' {
 Test 'no board at all stops with the reason' {
     function Get-WebText { throw 'not needed' }
     $ports = @((New-Port 'COM5' 0x10C4 0xEA60), (New-Port 'COM7' 0x303A 0x1001))
-    Assert-Throws { Invoke-MainOn '' -Ports $ports -Chips @{} } 'no ESP32 answered on COM7, COM5'
+    Assert-Throws { Invoke-MainOn '' -Ports $ports -Chips @{} } 'no ESP chip answered on COM7, COM5'
     Assert-Throws { Invoke-MainOn '' -Chips @{} } 'no chip on COM5'
 }
 
@@ -277,6 +277,41 @@ Test 'chip, memory and MAC are read from esptool flash-id' {
     }
     $chip = Get-Chip 'COM5'
     Assert-Equal 'ESP32-S3 8 16MB 24:58:7c:e1:23:45' "$($chip.Name) $($chip.PsramMb) $($chip.FlashSize) $($chip.Mac)" 'chip'
+}
+
+Test 'esp8266 is recognised and gets the build for its flash size' {
+    function Invoke-Esptool {
+        [pscustomobject]@{ Code = 0; Seconds = 1; Output = @(
+                'Chip type:          ESP8266EX'
+                'Features:           Wi-Fi, 160MHz'
+                'Crystal frequency:  26MHz'
+                'MAC:                5C:CF:7F:01:02:03'
+                "Detected flash size: $size") -join "`n" }
+    }
+    $builds = ConvertTo-Builds 'ESP8266_GENERIC' @('ESP8266_GENERIC-20250911-v1.26.1.bin',
+        'ESP8266_GENERIC-FLASH_1M-20250911-v1.26.1.bin', 'ESP8266_GENERIC-FLASH_512K-20250911-v1.26.1.bin',
+        'ESP8266_GENERIC-OTA-20250911-v1.26.1.bin')
+    foreach ($case in @(@('4MB', ''), @('2MB', ''), @('1MB', 'FLASH_1M'), @('512KB', 'FLASH_512K'))) {
+        $size = $case[0]
+        $chip = Get-Chip 'COM5'
+        Assert-Equal "ESP8266 $size 5c:cf:7f:01:02:03" "$($chip.Name) $($chip.FlashSize) $($chip.Mac)" "chip with $size"
+        Assert-Equal $case[1] (Get-VariantGuess $chip.Name '' 0 $builds $chip.FlashSize) "variant for $size"
+    }
+    Assert-Equal 'ESP8266_GENERIC 0x0 esp8266' "$($Boards['ESP8266']) $(Format-Offset 'ESP8266') $(ConvertTo-ChipArg 'ESP8266')" 'board'
+    $info = Get-BannerInfo "MicroPython v1.26.1 on 2025-09-11; ESP module with ESP8266`r`n>>> "
+    Assert-Equal '1.26.1|ESP module' "$($info.Version)|$($info.Machine)" 'banner'
+}
+
+Test 'esp8266 is written with the flash size detected' {
+    $calls = New-Object System.Collections.Generic.List[string]
+    function Invoke-Esptool([string]$Port, [string[]]$Arguments) {
+        $calls.Add($Arguments -join ' ')
+        [pscustomobject]@{ Code = 0; Seconds = 1; Output = '' }
+    }
+    Invoke-Flash 'COM5' 'ESP8266' 'fw.bin' $false | Out-Null
+    Invoke-Flash 'COM5' 'ESP32-S3' 'fw.bin' $false | Out-Null
+    Assert-Equal '--chip esp8266 write-flash --flash-size detect 0x0 fw.bin' $calls[0] 'esp8266'
+    Assert-Equal '--chip esp32s3 write-flash 0x0 fw.bin' $calls[1] 'esp32-s3'
 }
 
 Test 'esptool progress lines are parsed' {

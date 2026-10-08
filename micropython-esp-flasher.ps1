@@ -19,6 +19,7 @@ $Boards = @{
     'ESP32-C6' = 'ESP32_GENERIC_C6'
     'ESP32-H2' = 'ESP32_GENERIC_H2'
     'ESP32-P4' = 'ESP32_GENERIC_P4'
+    'ESP8266'  = 'ESP8266_GENERIC'
 }
 
 # esptool's CHIP_DEFS[chip].BOOTLOADER_FLASH_OFFSET
@@ -32,6 +33,12 @@ $BootloaderOffsets = @{
     'ESP32-C6' = 0x0
     'ESP32-H2' = 0x0
     'ESP32-P4' = 0x2000
+    'ESP8266'  = 0x0
+}
+
+# extra write-flash options; MicroPython's ESP8266 guide asks esptool to size the flash itself
+$WriteOptions = @{
+    'ESP8266' = @('--flash-size', 'detect')
 }
 
 $FamilyRe = '^ESP32-(S2|S3|C2|C3|C5|C6|H2|P4)\b'
@@ -184,7 +191,7 @@ function Write-Activity([string]$Label, [string]$Text, [int]$Frame, [double]$Fra
 
 function Write-Title {
     Write-Ui
-    Write-Line @('  ', 'Gray', 'micropython-esp-flasher', 'Cyan', '   flash stable MicroPython onto ESP32', 'DarkGray')
+    Write-Line @('  ', 'Gray', 'micropython-esp-flasher', 'Cyan', '   stable MicroPython for ESP32 and ESP8266', 'DarkGray')
     Write-Line @('  ', 'Gray', ($G.H * [math]::Min((Get-Width) - 2, 60)), 'DarkGray')
     Write-Ui
 }
@@ -634,6 +641,7 @@ function Format-Offset([string]$Chip) {
 }
 
 function ConvertTo-ChipName([string]$Name) {
+    if ($Name -match '^ESP8266') { return 'ESP8266' }
     if ($Name -match $FamilyRe) { "ESP32-$($Matches[1])" } else { 'ESP32' }
 }
 
@@ -661,7 +669,7 @@ function Get-PortClass($Port) {
     if ($known) { return $known }
     $vendor = $KnownVendors[$Port.VendorId]
     if ($vendor) { return $vendor, $true }
-    # ESP32 boards come with Espressif USB or one of the bridges above; anything else is left
+    # ESP boards come with Espressif USB or one of the bridges above; anything else is left
     # untouched, since probing toggles DTR/RTS and types into the port
     "unknown adapter $(Format-PortIds $Port), not probed", $false
 }
@@ -708,7 +716,7 @@ function Find-Ports {
     }
 
     if (-not $usable) {
-        Write-Step fail 'port' 'no ESP32 adapter'
+        Write-Step fail 'port' 'no ESP adapter'
         Write-Note ($skipped -join "`n")
         if ($cdc) {
             Fail ("no port that can be flashed`n" +
@@ -780,13 +788,13 @@ function Get-Chip([string]$Port, [switch]$Optional) {
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
         $phase = if ($attempt) { 'no answer, retrying' } else { 'connecting' }
         $out = (Invoke-Esptool $Port 'flash-id' -Label 'chip' -Phase $phase).Output
-        $m = [regex]::Match($out, 'Chip (?:is|type:)\s*(ESP32\S*)')
+        $m = [regex]::Match($out, 'Chip (?:is|type:)\s*(ESP(?:32|8266)\S*)')
         if ($m.Success) { break }
         if ($attempt -eq 0) { Start-Sleep -Milliseconds 1500 }
     }
     if (-not $m.Success) {
         if ($Optional) {
-            Write-Step skip 'chip' "no ESP32 answered on $Port" DarkGray
+            Write-Step skip 'chip' "no ESP chip answered on $Port" DarkGray
             $script:ChipOutput = $out
             return $null
         }
@@ -867,7 +875,13 @@ function Get-Builds([string]$Board) {
     $builds
 }
 
-function Get-VariantGuess([string]$Chip, [string]$Banner, [int]$PsramMb, $Builds) {
+function Get-VariantGuess([string]$Chip, [string]$Banner, [int]$PsramMb, $Builds, [string]$FlashSize = '') {
+    # ESP8266 builds differ by flash size: the base one needs 2MB or more
+    if ($Chip -eq 'ESP8266') {
+        if ($FlashSize -eq '512KB' -and $Builds.ContainsKey('FLASH_512K')) { return 'FLASH_512K' }
+        if ($FlashSize -eq '1MB' -and $Builds.ContainsKey('FLASH_1M')) { return 'FLASH_1M' }
+        return ''
+    }
     if ($Banner.Contains('Octal-SPIRAM') -and $Builds.ContainsKey('SPIRAM_OCT')) { return 'SPIRAM_OCT' }
     if ($Chip -eq 'ESP32-S3') {
         if ($PsramMb -ge 8 -and $Builds.ContainsKey('SPIRAM_OCT')) { return 'SPIRAM_OCT' }
@@ -989,7 +1003,7 @@ function Format-Written([string]$Output) {
 
 # "MicroPython v1.29.0 on 2026-08-24; Generic ESP32S3 module with Octal-SPIRAM with ESP32S3"
 function Get-BannerInfo([string]$Banner) {
-    $m = [regex]::Match($Banner, 'MicroPython v(\S+)(?: on [^;\r\n]*;\s*([^\r\n]*?)(?: with ESP32\S*)?)?\s*(?:\r|\n|$)')
+    $m = [regex]::Match($Banner, 'MicroPython v(\S+)(?: on [^;\r\n]*;\s*([^\r\n]*?)(?: with ESP(?:32|8266)\S*)?)?\s*(?:\r|\n|$)')
     if (-not $m.Success) { return $null }
     [pscustomobject]@{ Version = $m.Groups[1].Value; Machine = $m.Groups[2].Value.Trim() }
 }
@@ -1005,7 +1019,8 @@ function Invoke-Flash([string]$Port, [string]$Chip, [string]$Path, [bool]$Erase)
         Write-Step ok 'erase' 'whole chip' -Detail ([string]::Format($Inv, '{0:0.0} s', $r.Seconds))
     }
     foreach ($baud in $Bauds) {
-        $r = Invoke-Esptool $Port '--chip', $chipArg, 'write-flash', (Format-Offset $Chip), $Path -Baud $baud -Label 'write' -Bar
+        $write = @('--chip', $chipArg, 'write-flash') + @($WriteOptions[$Chip] | Where-Object { $_ }) + @((Format-Offset $Chip), $Path)
+        $r = Invoke-Esptool $Port $write -Baud $baud -Label 'write' -Bar
         if ($r.Code -eq 0) {
             Write-Step ok 'write' (Format-Written $r.Output) -Detail "$baud baud"
             return $baud
@@ -1066,7 +1081,7 @@ function Update-Board($Target, $Catalog) {
         $Catalog[$board] = Get-Builds $board
     }
     $builds = $Catalog[$board]
-    $guess = Get-VariantGuess $chip.Name $Target.Banner $chip.PsramMb $builds
+    $guess = Get-VariantGuess $chip.Name $Target.Banner $chip.PsramMb $builds $chip.FlashSize
     $variant = $guess
     if (-not $builds.ContainsKey($variant)) {
         Write-Note "the build $port needs is not available, pick one"
@@ -1192,7 +1207,7 @@ function Main {
     $left = @($found.Unprobed)
     $targets = @(Find-Boards $found.Ports $found.Skipped -Optional:($left.Count -gt 0))
     if (-not $targets -and $found.Ports -and -not $left) {
-        Fail "no ESP32 answered on $(@($found.Ports | ForEach-Object { $_.Device }) -join ', '), esptool said:" $ChipOutput
+        Fail "no ESP chip answered on $(@($found.Ports | ForEach-Object { $_.Device }) -join ', '), esptool said:" $ChipOutput
     }
 
     $catalog = @{}

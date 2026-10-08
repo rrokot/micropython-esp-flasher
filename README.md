@@ -1,8 +1,8 @@
 # micropython-esp-flasher
 
-Installs MicroPython on every connected ESP32 board, or updates it to the latest
-stable release. Nothing to configure or install: a Windows PowerShell script
-plus Espressif's `esptool.exe`.
+Installs MicroPython on every connected ESP32 or ESP8266 board, or updates it to
+the latest stable release. Nothing to configure or install: a Windows PowerShell
+script plus Espressif's `esptool.exe`.
 
 ![The flasher has found an ESP32-S3 running MicroPython 1.28.0 and counts down to updating it to 1.29.0](docs/screen.svg)
 
@@ -21,9 +21,9 @@ Press any key or click during the countdown for a menu: `flash`,
 `erase + flash` (wipes the files too), `other build`, `skip`. Arrows, mouse or
 the row's key all work.
 
-Ports are found on their own. Serial adapters that ESP32 boards don't use (an
+Ports are found on their own. Serial adapters that ESP boards don't use (an
 Arduino, say) are not touched; they are offered at the end in case one is
-an ESP32 after all.
+an ESP board after all.
 
 ## Offline
 
