@@ -191,7 +191,7 @@ function Write-Activity([string]$Label, [string]$Text, [int]$Frame, [double]$Fra
 
 function Write-Title {
     Write-Ui
-    Write-Line @('  ', 'Gray', 'micropython-esp-flasher', 'Cyan', '   stable MicroPython for ESP32 and ESP8266', 'DarkGray')
+    Write-Line @('  ', 'Gray', 'micropython-esp-flasher', 'Cyan', '   installs and updates MicroPython on ESP boards', 'DarkGray')
     Write-Line @('  ', 'Gray', ($G.H * [math]::Min((Get-Width) - 2, 60)), 'DarkGray')
     Write-Ui
 }

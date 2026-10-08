@@ -1,8 +1,8 @@
 # micropython-esp-flasher
 
-Installs MicroPython on every connected ESP32 or ESP8266 board, or updates it to
-the latest stable release. Nothing to configure or install: a Windows PowerShell
-script plus Espressif's `esptool.exe`.
+Installs MicroPython on every connected ESP board, or updates it to the latest
+stable release. Nothing to configure or install: a Windows PowerShell script
+plus Espressif's `esptool.exe`.
 
 ![The flasher has found an ESP32-S3 running MicroPython 1.28.0 and counts down to updating it to 1.29.0](docs/screen.svg)
 
