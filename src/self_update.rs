@@ -868,7 +868,8 @@ mod tests {
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 8192];
-            stream.read(&mut request).unwrap();
+            let count = stream.read(&mut request).unwrap();
+            assert!(count > 0, "The test server must receive a request");
             write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {advertised}\r\nConnection: close\r\n\r\n").unwrap();
             let _ = stream.write_all(&body);
         });
