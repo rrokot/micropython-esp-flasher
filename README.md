@@ -31,10 +31,6 @@ Press a key or click during this time to open the menu.
 Select `Install`, `Erase and install`, `Choose build`, or `Skip`.
 `Erase and install` deletes all files on the board.
 
-At normal startup, the tool checks for a new version and restarts after an update.
-
-To report a problem, include the log file from the `logs` folder.
-
 ## Offline
 
 The tool stores firmware in the `firmware` folder.
