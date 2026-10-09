@@ -8,6 +8,8 @@ The PowerShell version remains on `master`.
 Install Rust 1.99 or later and the native C build tools for your Rust target.
 On Windows, the standard MSVC toolchain needs Visual Studio C++ Build Tools.
 The GNU toolchain can use MinGW-w64.
+On Ubuntu or Debian, install `build-essential`, `pkg-config`, and `libudev-dev`.
+On macOS, install the Xcode Command Line Tools.
 
 ```text
 cargo fmt --check
@@ -19,6 +21,23 @@ cargo build --release --locked
 The executable is in `target/release`.
 By default, firmware and logs are stored next to the executable.
 During development, use `--data-dir .` to use the project folders.
+
+## Platforms
+
+GitHub Actions builds and tests Windows x64, Linux x64 and ARM64, and macOS x64 and ARM64.
+Each build uses a native runner. Rust dependencies and the license tool are cached between runs.
+The Linux builds use Ubuntu 22.04 and need glibc 2.35 or later and `libudev.so.1`.
+The macOS builds use macOS 15. The program runs in a terminal.
+
+On Linux, give your account access to the serial port. On Ubuntu or Debian, run
+`sudo usermod -aG dialout "$USER"`, then log out and log in again.
+Other distributions can use a different serial port group.
+Use `/dev/ttyUSB0` or `/dev/ttyACM0` in place of `COM5` in the commands below.
+On macOS, use the board's `/dev/cu.*` port.
+
+Flashing a connected board has been tested on Windows.
+Linux and macOS CI checks cover compilation, automated tests, and the packaged executable.
+They do not test a connected board.
 
 ## Commands
 
@@ -74,6 +93,8 @@ An error after reaching the MicroPython REPL prevents automatic flashing.
 
 ## Packaging
 
-The Windows workflow runs the checks and uploads a ZIP artifact.
-The ZIP contains the executable, README, illustration, project license and dependency license notices.
+The workflow uploads a ZIP for Windows and a `tar.gz` for Linux and macOS.
+Each archive contains the executable, README, illustration, project license and dependency license notices.
+Each artifact also contains a SHA-256 checksum file.
+CI extracts each archive and runs the executable to check the package and its file permissions.
 The artifact is a development build; it does not replace the current GitHub release.

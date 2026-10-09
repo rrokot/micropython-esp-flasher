@@ -10,18 +10,66 @@ permissions:
   contents: read
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform: windows
+            arch: x64
+            target: x86_64-pc-windows-msvc
+            executable: micropython-esp-flasher.exe
+            rustflags: -C target-feature=+crt-static
+          - runner: ubuntu-22.04
+            platform: linux
+            arch: x64
+            target: x86_64-unknown-linux-gnu
+            executable: micropython-esp-flasher
+            rustflags: ''
+          - runner: ubuntu-22.04-arm
+            platform: linux
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            executable: micropython-esp-flasher
+            rustflags: ''
+          - runner: macos-15-intel
+            platform: macos
+            arch: x64
+            target: x86_64-apple-darwin
+            executable: micropython-esp-flasher
+            rustflags: ''
+          - runner: macos-15
+            platform: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+            executable: micropython-esp-flasher
+            rustflags: ''
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: pwsh
     env:
-      RUSTFLAGS: -C target-feature=+crt-static
-      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          sudo apt-get install -y libudev-dev pkg-config
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Set up Rust
-        shell: pwsh
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-cargo-about-0.9.2
       - name: Check formatting
         run: cargo fmt --check
       - name: Check code
@@ -31,15 +79,45 @@ jobs:
       - name: Build executable
         run: cargo build --release --locked
       - name: Build license notices
-        shell: pwsh
         run: |
-          cargo install cargo-about --locked --features cli
+          $about = Get-Command cargo-about -ErrorAction SilentlyContinue
+          if (-not $about -or (& cargo-about --version) -ne 'cargo-about 0.9.2') {
+            cargo install cargo-about --version 0.9.2 --locked --features cli --force
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           cargo about generate --locked --all-features about.hbs --output-file target/THIRD-PARTY-LICENSES.html
-      - name: Create ZIP
-        shell: pwsh
-        run: ./scripts/package.ps1 -Executable target/x86_64-pc-windows-msvc/release/micropython-esp-flasher.exe
+      - name: Create archive
+        run: >-
+          ./scripts/package.ps1
+          -Platform ${{ matrix.platform }} -Architecture ${{ matrix.arch }}
+          -Executable target/${{ matrix.target }}/release/${{ matrix.executable }}
+      - name: Test packaged executable
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'mpflash-package-test'
+          New-Item -ItemType Directory -Path $destination | Out-Null
+          $archives = @(Get-ChildItem dist -File | Where-Object { $_.Name -match '\.(zip|tar\.gz)$' })
+          if ($archives.Count -ne 1) { throw 'Expected one package archive.' }
+          $archive = $archives[0]
+          if ($IsWindows) {
+            Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
+          } else {
+            tar -xzf $archive.FullName -C $destination
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $package = Join-Path $destination 'micropython-esp-flasher'
+          foreach ($file in 'README.md', 'LICENSE', 'THIRD-PARTY-LICENSES.html', 'docs/screen.svg') {
+            if (-not (Test-Path -LiteralPath (Join-Path $package $file))) { throw "Missing package file: $file" }
+          }
+          $executable = Join-Path $package '${{ matrix.executable }}'
+          & $executable --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $executable --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v7
         with:
-          name: micropython-esp-flasher-windows-x64
-          path: dist/*.zip
+          name: micropython-esp-flasher-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
           if-no-files-found: error

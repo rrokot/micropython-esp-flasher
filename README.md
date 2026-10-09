@@ -1,6 +1,6 @@
 # micropython-esp-flasher
 
-Install or update MicroPython on ESP32 boards from a Windows 10 or 11 (x64) computer.
+Install or update MicroPython on ESP32 boards from Windows, Linux, or macOS.
 
 ![MicroPython update countdown](docs/screen.svg)
 
@@ -17,10 +17,13 @@ The tool can:
 
 ## Usage
 
-1. Download the ZIP file from the [Rust build](https://github.com/rrokot/micropython-esp-flasher/actions/workflows/rust.yml).
-2. Extract the ZIP file.
+1. Download the archive for your system from the [Rust build](https://github.com/rrokot/micropython-esp-flasher/actions/workflows/rust.yml).
+2. Extract the archive.
 3. Connect your boards to the computer.
-4. Double-click `micropython-esp-flasher.exe`.
+4. On Windows, double-click `micropython-esp-flasher.exe`. On Linux or macOS, open a terminal in the tool folder and run `./micropython-esp-flasher`.
+
+Builds are available for Windows x64, Linux x64 and ARM64, and macOS Intel and Apple Silicon.
+Linux needs permission to use the serial port. See [platform notes](docs/development.md#platforms).
 
 The tool waits 5 seconds before it writes firmware or skips a board.
 Press a key or click during this time to open the menu.

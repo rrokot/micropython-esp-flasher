@@ -65,6 +65,10 @@ pub fn ports() -> Result<Vec<PortInfo>> {
         .into_iter()
         .filter_map(convert_port)
         .collect();
+    // macOS exposes each adapter through both callout and dial-in devices.
+    // Use the callout device so automatic discovery visits each adapter once.
+    #[cfg(target_os = "macos")]
+    ports.retain(|port| !port.name.starts_with("/dev/tty."));
     ports.sort_by_key(|port| {
         (
             !port.native(),
