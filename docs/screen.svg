@@ -1,7 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="610" viewBox="0 0 880 610" role="img" aria-label="micropython-esp-flasher: board details and firmware countdown">
 <rect width="880" height="610" rx="12" fill="#0c0c0c"/>
-<rect width="880" height="30" rx="12" fill="#1f1f1f"/><rect y="18" width="880" height="12" fill="#1f1f1f"/>
-<text x="24" y="20" fill="#cccccc" font-family="Segoe UI, Arial, sans-serif" font-size="12">micropython-esp-flasher</text>
 <g font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="15" xml:space="preserve">
 <text x="35" y="58" fill="#61d6d6">micropython-esp-flasher 0.5.1</text>
 <text x="35" y="80" fill="#cccccc">MicroPython for ESP32 boards</text>
