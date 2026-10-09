@@ -8,5 +8,5 @@ dist/
 backups/
 /micropython-esp-flasher.exe
 /THIRD-PARTY-LICENSES.html
-.mpflash-update-*/
+.micropython-esp-flasher-update-*/
 *.update.lock

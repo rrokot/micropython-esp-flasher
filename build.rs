@@ -1,8 +1,8 @@
 #[cfg(windows)]
 fn main() {
-    println!("cargo:rerun-if-changed=assets/mpflash.ico");
+    println!("cargo:rerun-if-changed=assets/micropython-esp-flasher.ico");
     winresource::WindowsResource::new()
-        .set_icon("assets/mpflash.ico")
+        .set_icon("assets/micropython-esp-flasher.ico")
         .set("ProductName", "micropython-esp-flasher")
         .set("FileDescription", "MicroPython flasher for ESP32 boards")
         .set("OriginalFilename", "micropython-esp-flasher.exe")

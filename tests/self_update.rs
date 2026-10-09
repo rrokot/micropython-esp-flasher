@@ -82,7 +82,7 @@ fn exercise_update(interactive: bool, legacy: bool) {
     fs::create_dir(root.path().join("firmware")).unwrap();
     fs::write(root.path().join("firmware/board.bin"), b"keep-firmware").unwrap();
     let stage = tempfile::Builder::new()
-        .prefix(".mpflash-update-")
+        .prefix(".micropython-esp-flasher-update-")
         .tempdir_in(root.path())
         .unwrap();
     let candidate = stage.path().join(exe);
@@ -98,9 +98,9 @@ fn exercise_update(interactive: bool, legacy: bool) {
         {
             use std::os::windows::process::CommandExt;
             Command::new("pwsh.exe")
-                .args(["-NoProfile", "-Command", "$p = Start-Process -FilePath $env:MPFLASH_TEST_EXE -ArgumentList ('\"' + $env:MPFLASH_TEST_READY + '\"') -WindowStyle Hidden -PassThru; $p.WaitForExit(); exit $p.ExitCode"])
-                .env("MPFLASH_TEST_EXE", &target)
-                .env("MPFLASH_TEST_READY", stage.path().join("ready"))
+                .args(["-NoProfile", "-Command", "$p = Start-Process -FilePath $env:MICROPYTHON_ESP_FLASHER_TEST_EXE -ArgumentList ('\"' + $env:MICROPYTHON_ESP_FLASHER_TEST_READY + '\"') -WindowStyle Hidden -PassThru; $p.WaitForExit(); exit $p.ExitCode"])
+                .env("MICROPYTHON_ESP_FLASHER_TEST_EXE", &target)
+                .env("MICROPYTHON_ESP_FLASHER_TEST_READY", stage.path().join("ready"))
                 .creation_flags(0x0800_0000)
                 .spawn()
                 .unwrap()

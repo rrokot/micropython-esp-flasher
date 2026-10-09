@@ -17,7 +17,7 @@ use tempfile::{Builder, TempDir};
 
 const REPOSITORY: &str = "rrokot/micropython-esp-flasher";
 const LATEST: &str = "https://api.github.com/repos/rrokot/micropython-esp-flasher/releases/latest";
-const PREFIX: &str = ".mpflash-update-";
+const PREFIX: &str = ".micropython-esp-flasher-update-";
 const APPLY: &str = "--internal-apply-update";
 const FINISH: &str = "--internal-finish-update";
 const NOTICE: &str = "THIRD-PARTY-LICENSES.html";

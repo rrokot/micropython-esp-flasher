@@ -1,4 +1,4 @@
-# <img src="assets/mpflash.svg" width="32" height="32" alt=""> micropython-esp-flasher
+# <img src="assets/micropython-esp-flasher.svg" width="32" height="32" alt=""> micropython-esp-flasher
 
 Install and update MicroPython on ESP32 boards.
 

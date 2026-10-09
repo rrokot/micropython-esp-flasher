@@ -798,16 +798,17 @@ snapshot('/')
     }
 
     #[test]
-    #[ignore = "Needs MPFLASH_HARDWARE_TEST=1 and MPFLASH_TEST_PORT; backs up and reflashes a real board"]
+    #[ignore = "Needs MICROPYTHON_ESP_FLASHER_HARDWARE_TEST=1 and MICROPYTHON_ESP_FLASHER_TEST_PORT; backs up and reflashes a real board"]
     fn hardware_reflash_preserves_all_files() -> Result<()> {
         ensure!(
-            std::env::var("MPFLASH_HARDWARE_TEST").as_deref() == Ok("1"),
-            "Set MPFLASH_HARDWARE_TEST=1 to permit a real flash"
+            std::env::var("MICROPYTHON_ESP_FLASHER_HARDWARE_TEST").as_deref() == Ok("1"),
+            "Set MICROPYTHON_ESP_FLASHER_HARDWARE_TEST=1 to permit a real flash"
         );
-        let name = std::env::var("MPFLASH_TEST_PORT")
-            .context("Set MPFLASH_TEST_PORT to the test board's port")?;
+        let name = std::env::var("MICROPYTHON_ESP_FLASHER_TEST_PORT")
+            .context("Set MICROPYTHON_ESP_FLASHER_TEST_PORT to the test board's port")?;
         let root = PathBuf::from(
-            std::env::var("MPFLASH_DATA_DIR").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").into()),
+            std::env::var("MICROPYTHON_ESP_FLASHER_DATA_DIR")
+                .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").into()),
         );
         let port = device::ports()?
             .into_iter()
@@ -837,7 +838,10 @@ snapshot('/')
         Connected::open(&port, Some(921_600))?.backup(&target.hardware, &backup)?;
         println!("Full flash backup: {}", backup.display());
         thread::sleep(Duration::from_millis(700));
-        let marker = format!("/.mpflash-rust-smoke-{}-{stamp}", std::process::id());
+        let marker = format!(
+            "/.micropython-esp-flasher-smoke-{}-{stamp}",
+            std::process::id()
+        );
         let marker_json = serde_json::to_string(&marker)?;
         let baseline = {
             let mut session = session(&port)?;
