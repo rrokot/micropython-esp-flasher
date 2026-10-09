@@ -18,10 +18,9 @@ The tool can:
 
 ## Usage
 
-1. Download the archive for your system from the [latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest).
-2. Extract the archive.
-3. Connect your boards to the computer.
-4. On Windows, double-click `micropython-esp-flasher.exe`. On Linux or macOS, open a terminal in the tool folder and run `./micropython-esp-flasher`.
+Download the build for your system from the [latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest).
+On Windows, run `micropython-esp-flasher.exe`.
+On Linux or macOS, run `./micropython-esp-flasher` from a terminal.
 
 Builds are available for Windows x64, Linux x64 and ARM64, and macOS Intel and Apple Silicon.
 Linux needs glibc 2.35 or later, `libudev.so.1`, and access to the serial port.
