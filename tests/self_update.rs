@@ -19,6 +19,16 @@ fn hash(path: &std::path::Path) -> String {
 
 #[test]
 fn helper_waits_for_the_running_program_replaces_it_and_restarts() {
+    exercise_update(false);
+}
+
+#[cfg(windows)]
+#[test]
+fn interactive_update_keeps_the_original_windows_console() {
+    exercise_update(true);
+}
+
+fn exercise_update(interactive: bool) {
     let root = tempfile::tempdir().unwrap();
     let exe = if cfg!(windows) {
         "micropython-esp-flasher.exe"
@@ -33,6 +43,16 @@ fn helper_waits_for_the_running_program_replaces_it_and_restarts() {
         if std::env::args().any(|arg| arg == "--version") {
             println!("micropython-esp-flasher 0.4.0");
         } else {
+            if let Some(ready) = std::env::args().nth(1) {
+                let ready = std::path::Path::new(&ready);
+                let root = ready.parent().unwrap().parent().unwrap();
+                std::fs::write(root.join("parent.pid"), std::process::id().to_string()).unwrap();
+                let start = std::time::Instant::now();
+                while !ready.exists() {
+                    assert!(start.elapsed().as_secs() < 15);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     }"#,
@@ -68,25 +88,61 @@ fn helper_waits_for_the_running_program_replaces_it_and_restarts() {
         b"new-notices",
     )
     .unwrap();
-    let mut parent = Command::new(&target).spawn().unwrap();
+    let mut parent = if interactive {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            Command::new("pwsh.exe")
+                .args(["-NoProfile", "-Command", "$p = Start-Process -FilePath $env:MPFLASH_TEST_EXE -ArgumentList ('\"' + $env:MPFLASH_TEST_READY + '\"') -WindowStyle Hidden -PassThru; $p.WaitForExit(); exit $p.ExitCode"])
+                .env("MPFLASH_TEST_EXE", &target)
+                .env("MPFLASH_TEST_READY", stage.path().join("ready"))
+                .creation_flags(0x0800_0000)
+                .spawn()
+                .unwrap()
+        }
+        #[cfg(not(windows))]
+        unreachable!("The console test is Windows-only")
+    } else {
+        Command::new(&target).spawn().unwrap()
+    };
+    let parent_pid = if interactive {
+        let started = Instant::now();
+        let path = root.path().join("parent.pid");
+        loop {
+            if let Ok(text) = fs::read_to_string(&path)
+                && let Ok(pid) = text.parse::<u32>()
+            {
+                break pid;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10));
+            thread::sleep(Duration::from_millis(25));
+        }
+    } else {
+        parent.id()
+    };
     let old_hash = hash(&target);
     let new_hash = hash(&candidate);
     let request = serde_json::json!({
-        "target": fs::canonicalize(&target).unwrap(), "parent_pid": parent.id(),
+        "target": fs::canonicalize(&target).unwrap(), "parent_pid": parent_pid,
         "version": env!("CARGO_PKG_VERSION"), "previous_version": "0.4.0",
         "previous_digest": old_hash, "new_digest": new_hash,
-        "args": ["--version"], "working_dir": root.path(), "interactive": false
+        "args": ["--version"], "working_dir": root.path(), "interactive": interactive
     });
     fs::write(
         stage.path().join("request.json"),
         serde_json::to_vec(&request).unwrap(),
     )
     .unwrap();
-    let mut helper = Command::new(&candidate)
+    let mut helper_command = Command::new(&candidate);
+    helper_command
         .arg("--internal-apply-update")
-        .arg(stage.path())
-        .spawn()
-        .unwrap();
+        .arg(stage.path());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        helper_command.creation_flags(0x0800_0000);
+    }
+    let mut helper = helper_command.spawn().unwrap();
     thread::sleep(Duration::from_millis(200));
     assert_eq!(
         hash(&target),
