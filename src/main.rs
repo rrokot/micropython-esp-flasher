@@ -177,12 +177,13 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
 
 fn show_target(target: &Target, ui: &Ui) {
     ui.section(&target.port.name);
-    ui.step(
-        "USB ID",
-        format!("{:04x}:{:04x}", target.port.vid, target.port.pid),
+    log::info!(
+        "USB ID       {:04x}:{:04x}",
+        target.port.vid,
+        target.port.pid
     );
     if let Some(serial) = &target.port.serial {
-        ui.step("serial", serial);
+        log::info!("serial       {serial}");
     }
     ui.step(
         "repl",
