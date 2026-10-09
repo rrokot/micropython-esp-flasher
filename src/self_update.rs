@@ -670,6 +670,44 @@ fn wait_parent(pid: u32) -> Result<()> {
     }
 }
 
+#[cfg(windows)]
+fn attach_console(pid: u32) -> Result<[File; 2]> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, FreeConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        SetStdHandle,
+    };
+    // An inherited console can already be attached even for a hidden process.
+    unsafe { FreeConsole() };
+    ensure!(
+        unsafe { AttachConsole(pid) } != 0,
+        "Cannot keep the program console open: {}",
+        io::Error::last_os_error()
+    );
+    let input = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(3)
+        .open("CONIN$")?;
+    let output = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(3)
+        .open("CONOUT$")?;
+    for (name, file) in [
+        (STD_INPUT_HANDLE, &input),
+        (STD_OUTPUT_HANDLE, &output),
+        (STD_ERROR_HANDLE, &output),
+    ] {
+        ensure!(
+            unsafe { SetStdHandle(name, file.as_raw_handle()) } != 0,
+            "Cannot restore the program console handles: {}",
+            io::Error::last_os_error()
+        );
+    }
+    Ok([input, output])
+}
+
 fn apply(stage: &Path) -> Result<()> {
     let mut request = read_request(stage)?;
     ensure!(
@@ -685,15 +723,13 @@ fn apply(stage: &Path) -> Result<()> {
         "Prepared executable digest mismatch"
     );
     #[cfg(windows)]
-    if request.interactive {
+    let _console = if request.interactive {
         // Keep the original console alive while the old program exits.
         // The restarted program inherits this console and its input handles.
-        ensure!(
-            unsafe { windows_sys::Win32::System::Console::AttachConsole(request.parent_pid) } != 0,
-            "Cannot keep the program console open: {}",
-            io::Error::last_os_error()
-        );
-    }
+        Some(attach_console(request.parent_pid)?)
+    } else {
+        None
+    };
     // This handshake must remain compatible with earlier updater versions.
     File::create_new(stage.join("ready"))?.sync_all()?;
     wait_parent(request.parent_pid)?;
