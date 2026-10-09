@@ -6,3 +6,7 @@ logs/
 target/
 dist/
 backups/
+/micropython-esp-flasher.exe
+/THIRD-PARTY-LICENSES.html
+.mpflash-update-*/
+*.update.lock

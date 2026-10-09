@@ -105,7 +105,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           $package = Join-Path $destination 'micropython-esp-flasher'
-          foreach ($file in 'README.md', 'LICENSE', 'THIRD-PARTY-LICENSES.html', 'docs/screen.svg') {
+          foreach ($file in 'LICENSE', 'THIRD-PARTY-LICENSES.html') {
             if (-not (Test-Path -LiteralPath (Join-Path $package $file))) { throw "Missing package file: $file" }
           }
           $executable = Join-Path $package '${{ matrix.executable }}'

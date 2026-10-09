@@ -8,6 +8,7 @@ Install or update MicroPython on ESP32 boards from Windows, Linux, or macOS.
 
 The tool can:
 
+- Update itself from GitHub Releases before it connects to boards.
 - Find USB serial ports and update several ESP32 boards in one run.
 - Select firmware from chip type, flash size, and PSRAM.
 - Skip boards that need no update, including boards with a newer MicroPython version.
@@ -30,6 +31,10 @@ The tool waits 5 seconds before it writes firmware or skips a board.
 Press a key or click during this time to open the menu.
 Select `flash`, `erase + flash`, `other build`, or `skip`.
 `erase + flash` deletes all files on the board.
+
+At normal startup, the tool checks for a new version and restarts after an update.
+Use `--no-self-update` to disable this check, or `self-update` to update the tool directly.
+`--offline` also disables the update check.
 
 To report a problem, include the log file from the `logs` folder.
 

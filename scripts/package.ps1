@@ -11,21 +11,21 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $outputRoot = Join-Path $projectRoot 'dist'
 $packageName = 'micropython-esp-flasher'
-$stagingRoot = Join-Path $outputRoot "staging/$Platform-$Architecture"
+$stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ("mpflash-package-" + [guid]::NewGuid())
 $packageRoot = Join-Path $stagingRoot $packageName
 $executablePath = Join-Path $projectRoot $Executable
 $noticesPath = Join-Path $projectRoot $Notices
 if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) { throw 'Build the release executable first.' }
 if (-not (Test-Path -LiteralPath $noticesPath -PathType Leaf)) { throw 'Generate the dependency license notices first.' }
-New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'docs') | Out-Null
+New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $executableName = if ($Platform -eq 'windows') { "$packageName.exe" } else { $packageName }
 $packagedExecutable = Join-Path $packageRoot $executableName
 Copy-Item -LiteralPath $executablePath -Destination $packagedExecutable
 Copy-Item -LiteralPath $noticesPath -Destination (Join-Path $packageRoot 'THIRD-PARTY-LICENSES.html')
-foreach ($name in 'README.md', 'LICENSE') {
+foreach ($name in 'LICENSE') {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination (Join-Path $packageRoot $name)
 }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/screen.svg') -Destination (Join-Path $packageRoot 'docs/screen.svg')
 if ($Platform -eq 'windows') {
     $archive = Join-Path $outputRoot "$packageName-$Platform-$Architecture.zip"
     Compress-Archive -LiteralPath $packageRoot -DestinationPath $archive -Force
