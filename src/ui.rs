@@ -127,7 +127,7 @@ impl Ui {
         let color = match label {
             "ready" | "verified" => Color::Green,
             "skip" => Color::Grey,
-            "connect" | "writing" | "verify" | "tool" => Color::Cyan,
+            "scan" | "connect" | "writing" | "verify" | "tool" => Color::Cyan,
             _ => Color::White,
         };
         self.field(label, value.as_ref(), color);
@@ -147,13 +147,13 @@ impl Ui {
             println!("  {label:<12} {value}");
         }
     }
-    pub fn result(&self, port: &str, outcome: &str) {
+    pub fn result(&self, outcome: &str) {
         let color = match outcome {
             "skipped" | "would skip" => Color::Grey,
             "would flash" => Color::Cyan,
             _ => Color::Green,
         };
-        self.field("result", &format!("{port}   {outcome}"), color);
+        self.field("result", outcome, color);
     }
     pub fn summary(&self, written: usize, skipped: usize, failed: usize, preview: bool) {
         self.section(if preview {

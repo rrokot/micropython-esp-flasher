@@ -3,10 +3,8 @@
 <g font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="15" xml:space="preserve">
 <text x="35" y="58" fill="#61d6d6">micropython-esp-flasher 0.5.2</text>
 <text x="35" y="80" fill="#767676">────────────────────────────────────────────────────────────────────</text>
-<text x="35" y="122" fill="#61d6d6">Device · COM5</text>
+<text x="35" y="122" fill="#61d6d6">COM5</text>
 <text x="35" y="144" fill="#767676">────────────────────────────────────────────────────────────────────</text>
-<text x="35" y="166" fill="#cccccc">port</text>
-<text x="152" y="166" fill="#f2f2f2">COM5</text>
 <text x="35" y="188" fill="#cccccc">USB ID</text>
 <text x="152" y="188" fill="#f2f2f2">10c4:ea60</text>
 <text x="35" y="210" fill="#cccccc">serial</text>
@@ -23,7 +21,7 @@
 <text x="152" y="320" fill="#f2f2f2">0x200000</text>
 <text x="35" y="362" fill="#cccccc">catalog</text>
 <text x="152" y="362" fill="#f2f2f2">asking micropython.org</text>
-<text x="35" y="404" fill="#61d6d6">COM5 · esp32s3</text>
+<text x="35" y="404" fill="#61d6d6">Firmware plan</text>
 <text x="35" y="426" fill="#767676">────────────────────────────────────────────────────────────────────</text>
 <text x="35" y="448" fill="#cccccc">MicroPython</text>
 <text x="152" y="448" fill="#f2f2f2">1.29.0 → 1.29.0</text>

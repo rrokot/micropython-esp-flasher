@@ -139,14 +139,6 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
     let mut seen = HashSet::new();
     let mut failures = 0;
     for port in ports {
-        if let Some(ui) = ui {
-            ui.section(&format!("Device · {}", port.name));
-            ui.step("port", &port.name);
-            ui.step("USB ID", format!("{:04x}:{:04x}", port.vid, port.pid));
-            if let Some(serial) = &port.serial {
-                ui.step("serial", serial);
-            }
-        }
         match inspect(port) {
             Ok(target) => {
                 if let Some(mac) = &target.hardware.mac
@@ -159,37 +151,6 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
                         );
                     }
                     continue;
-                }
-                if let Some(ui) = ui {
-                    ui.step(
-                        "repl",
-                        target
-                            .running
-                            .as_ref()
-                            .map_or("no MicroPython answer".into(), |r| {
-                                format!("MicroPython {}   {}", r.version, r.machine)
-                            }),
-                    );
-                    ui.step(
-                        "chip",
-                        format!(
-                            "{}   {}MB flash   {}MB PSRAM",
-                            target.hardware.chip,
-                            target.hardware.flash_size / 1024 / 1024,
-                            target.hardware.psram_mb
-                        ),
-                    );
-                    if let Some(mac) = &target.hardware.mac {
-                        ui.step("MAC", mac);
-                    }
-                    if let Some(running) = &target.running {
-                        if !running.build.is_empty() {
-                            ui.step("build", &running.build);
-                        }
-                        if let Some(filesystem) = running.filesystem {
-                            ui.step("filesystem", format!("0x{filesystem:x}"));
-                        }
-                    }
                 }
                 targets.push(target);
             }
@@ -212,6 +173,46 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
         }
     }
     (targets, failures)
+}
+
+fn show_target(target: &Target, ui: &Ui) {
+    ui.section(&target.port.name);
+    ui.step(
+        "USB ID",
+        format!("{:04x}:{:04x}", target.port.vid, target.port.pid),
+    );
+    if let Some(serial) = &target.port.serial {
+        ui.step("serial", serial);
+    }
+    ui.step(
+        "repl",
+        target
+            .running
+            .as_ref()
+            .map_or("no MicroPython answer".into(), |r| {
+                format!("MicroPython {}   {}", r.version, r.machine)
+            }),
+    );
+    ui.step(
+        "chip",
+        format!(
+            "{}   {}MB flash   {}MB PSRAM",
+            target.hardware.chip,
+            target.hardware.flash_size / 1024 / 1024,
+            target.hardware.psram_mb
+        ),
+    );
+    if let Some(mac) = &target.hardware.mac {
+        ui.step("MAC", mac);
+    }
+    if let Some(running) = &target.running {
+        if !running.build.is_empty() {
+            ui.step("build", &running.build);
+        }
+        if let Some(filesystem) = running.filesystem {
+            ui.step("filesystem", format!("0x{filesystem:x}"));
+        }
+    }
 }
 
 fn variant_name(variant: &str) -> &str {
@@ -286,7 +287,7 @@ fn flash(target: &Target, path: &Path, erase: bool, ui: &Ui) -> Result<()> {
     );
     let mut last = None;
     for baud in [2_000_000, 921_600, 460_800, 115_200] {
-        ui.step("connect", format!("{} at {baud} baud", target.port.name));
+        ui.step("connect", format!("{baud} baud"));
         let result = (|| -> Result<()> {
             let mut connected = Connected::open(&target.port, Some(baud))?;
             let actual = connected.hardware(target.running.as_ref())?;
@@ -367,7 +368,7 @@ fn update(
             format!("{board}-{variant}")
         };
         ui.card(
-            &format!("{} · {}", target.port.name, target.hardware.chip),
+            "Firmware plan",
             &[
                 (
                     "MicroPython",
@@ -499,12 +500,12 @@ fn update(
             variant_name(&variant)
         );
     }
+    if port.name != target.port.name {
+        ui.step("port", format!("{} (reconnected)", port.name));
+    }
     ui.step(
         "ready",
-        format!(
-            "MicroPython {} is running on {}",
-            running.version, port.name
-        ),
+        format!("MicroPython {} is running", running.version),
     );
     Ok(match change {
         Change::Install => "installed",
@@ -565,12 +566,14 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
         _ => FlashOptions::default(),
     };
     let mut catalogs = HashMap::new();
+    ui.step("scan", "reading USB serial ports");
     let (targets, mut failures) = read_targets(&ports, Some(ui), !args.port.is_empty());
     let mut seen: HashSet<String> = targets
         .iter()
         .filter_map(|target| target.hardware.mac.clone())
         .collect();
     let mut process = |target: &Target| -> Result<&'static str> {
+        show_target(target, ui);
         let board = &target.hardware.board;
         if !catalogs.contains_key(board) {
             ui.step("catalog", "asking micropython.org");
@@ -588,7 +591,7 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
         match process(target) {
             Ok(outcome) => {
                 outcomes.push(outcome);
-                ui.result(&target.port.name, outcome);
+                ui.result(outcome);
             }
             Err(error) => {
                 failures += 1;
@@ -627,7 +630,7 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
                 match process(&target) {
                     Ok(outcome) => {
                         outcomes.push(outcome);
-                        ui.result(&port.name, outcome);
+                        ui.result(outcome);
                     }
                     Err(error) => {
                         failures += 1;
