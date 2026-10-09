@@ -23,7 +23,8 @@ The tool can:
 4. On Windows, double-click `micropython-esp-flasher.exe`. On Linux or macOS, open a terminal in the tool folder and run `./micropython-esp-flasher`.
 
 Builds are available for Windows x64, Linux x64 and ARM64, and macOS Intel and Apple Silicon.
-Linux needs permission to use the serial port. See [platform notes](docs/development.md#platforms).
+Linux needs glibc 2.35 or later, `libudev.so.1`, and access to the serial port.
+On Ubuntu or Debian, add your account to the `dialout` group, then log out and log in again.
 
 The tool waits 5 seconds before it writes firmware or skips a board.
 Press a key or click during this time to open the menu.
@@ -39,17 +40,3 @@ For offline use:
 
 1. With the computer online, install each required firmware build on a board.
 2. Copy the complete tool folder to the offline computer.
-
-## Development
-
-Build the program with Rust 1.99 or later:
-
-```text
-cargo build --release --locked
-cargo test --locked
-```
-
-The program uses espflash as a library. It does not need a separate esptool program.
-ESP8266 is not supported.
-
-See [development notes](docs/development.md) for command-line options and board tests.
