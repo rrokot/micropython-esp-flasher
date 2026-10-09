@@ -5,7 +5,7 @@ The PowerShell version remains on `master`.
 
 ## Build and test
 
-Install Rust 1.95 or later and the native C build tools for your Rust target.
+Install Rust 1.99 or later and the native C build tools for your Rust target.
 On Windows, the standard MSVC toolchain needs Visual Studio C++ Build Tools.
 The GNU toolchain can use MinGW-w64.
 

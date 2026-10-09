@@ -2,26 +2,26 @@
 name = "micropython-esp-flasher"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.99"
 license = "MIT"
 description = "Install and update MicroPython on ESP32 boards"
 repository = "https://github.com/rrokot/micropython-esp-flasher"
 
 [dependencies]
-anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = { version = "4", features = ["derive"] }
-crossterm = "0.29"
-espflash = { version = "4.6", default-features = false, features = ["serialport"] }
-log = "0.4"
-regex = "1"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serialport = "4.8"
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
+espflash = { version = "4.6.0", default-features = false, features = ["serialport"] }
+log = "0.4.34"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serialport = "4.10.1"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.27.0"
 
 [profile.release]
 lto = "thin"

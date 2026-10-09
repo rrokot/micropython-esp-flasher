@@ -39,7 +39,7 @@ For offline use:
 
 ## Development
 
-Build the program with Rust 1.95 or later:
+Build the program with Rust 1.99 or later:
 
 ```text
 cargo build --release --locked
