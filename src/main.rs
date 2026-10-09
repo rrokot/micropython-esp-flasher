@@ -140,10 +140,12 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
     let mut failures = 0;
     for port in ports {
         if let Some(ui) = ui {
-            ui.step(
-                "port",
-                format!("{}  {:04x}:{:04x}", port.name, port.vid, port.pid),
-            );
+            ui.section(&format!("Device · {}", port.name));
+            ui.step("port", &port.name);
+            ui.step("USB ID", format!("{:04x}:{:04x}", port.vid, port.pid));
+            if let Some(serial) = &port.serial {
+                ui.step("serial", serial);
+            }
         }
         match inspect(port) {
             Ok(target) => {
@@ -177,6 +179,17 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
                             target.hardware.psram_mb
                         ),
                     );
+                    if let Some(mac) = &target.hardware.mac {
+                        ui.step("MAC", mac);
+                    }
+                    if let Some(running) = &target.running {
+                        if !running.build.is_empty() {
+                            ui.step("build", &running.build);
+                        }
+                        if let Some(filesystem) = running.filesystem {
+                            ui.step("filesystem", format!("0x{filesystem:x}"));
+                        }
+                    }
                 }
                 targets.push(target);
             }
@@ -231,8 +244,8 @@ fn erase_confirm(ui: &Ui) -> Result<bool> {
     Ok(ui.choose(
         "Erase the whole chip? All files will be deleted.",
         &[
-            Item::new('c', "cancel", "keep the board as it is"),
-            Item::new('e', "erase + flash", "delete all files"),
+            Item::new('c', "Cancel", "Keep board files"),
+            Item::new('e', "Erase and install", "Deletes all board files").danger(),
         ],
         0,
         Some(0),
@@ -348,26 +361,39 @@ fn update(
                         format!("{} {}", r.version, variant_name(v))
                     })
             });
+        let selected_build = if variant.is_empty() {
+            board.clone()
+        } else {
+            format!("{board}-{variant}")
+        };
         ui.card(
-            &format!(
-                "{} · {board}{}",
-                target.port.name,
-                if variant.is_empty() {
-                    String::new()
-                } else {
-                    format!("-{variant}")
-                }
-            ),
-            &format!("{from} → {}   {}", build.version, change.label()),
-            &format!(
-                "{}   {}",
-                target.hardware.chip,
-                if catalog.cache.join(&build.name).is_file() {
-                    "cached"
-                } else {
-                    "will be downloaded"
-                }
-            ),
+            &format!("{} · {}", target.port.name, target.hardware.chip),
+            &[
+                (
+                    "MicroPython",
+                    &format!("{from} → {}", build.version),
+                    crossterm::style::Color::White,
+                ),
+                ("Build", &selected_build, crossterm::style::Color::White),
+                (
+                    "Status",
+                    change.label(),
+                    match change {
+                        Change::UpToDate => crossterm::style::Color::Green,
+                        Change::WrongBuild | Change::Newer => crossterm::style::Color::Yellow,
+                        _ => crossterm::style::Color::Cyan,
+                    },
+                ),
+                (
+                    "Firmware",
+                    if catalog.cache.join(&build.name).is_file() {
+                        "cached"
+                    } else {
+                        "will be downloaded"
+                    },
+                    crossterm::style::Color::Grey,
+                ),
+            ],
         );
         let needed = change.needed() || options.force || options.erase || options.variant.is_some();
         if matches!(args.command, Some(Command::Plan)) {
@@ -378,9 +404,9 @@ fn update(
             });
         }
         let action = if options.erase {
-            "erase + flash".into()
+            "erase and install".into()
         } else if needed {
-            format!("flash {}", build.version)
+            format!("install {}", build.version)
         } else {
             "skip".into()
         };
@@ -403,13 +429,13 @@ fn update(
         }
         automatic = false;
         let mut items = vec![
-            Item::new('f', format!("flash {}", build.version), "write firmware"),
-            Item::new('e', "erase + flash", "delete all files"),
+            Item::new('f', format!("Install {}", build.version), "Write firmware"),
+            Item::new('e', "Erase and install", "Deletes all board files").danger(),
         ];
         if builds.len() > 1 {
-            items.push(Item::new('v', "other build", "choose a variant"));
+            items.push(Item::new('v', "Choose build", "Select a firmware variant"));
         }
-        items.push(Item::new('s', "skip", "leave the board as it is"));
+        items.push(Item::new('s', "Skip", "Keep the board as it is"));
         let skip = items.len() - 1;
         let choice = ui
             .choose(
@@ -498,7 +524,6 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
         ensure!(!targets.is_empty(), "No ESP32 chip was detected");
         return Ok(());
     }
-    ui.title();
     if let Some(Command::Backup { output }) = &args.command {
         ensure!(
             args.port.len() == 1 && ports.len() == 1,
@@ -558,9 +583,13 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
         let (builds, online) = &catalogs[board];
         update(target, builds, *online, &catalog, args, options, ui)
     };
+    let mut outcomes = Vec::new();
     for target in &targets {
         match process(target) {
-            Ok(outcome) => ui.step("result", format!("{}   {outcome}", target.port.name)),
+            Ok(outcome) => {
+                outcomes.push(outcome);
+                ui.result(&target.port.name, outcome);
+            }
             Err(error) => {
                 failures += 1;
                 ui.error(&format!("{}: {error:#}", target.port.name));
@@ -596,7 +625,10 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
                     continue;
                 }
                 match process(&target) {
-                    Ok(outcome) => ui.step("result", format!("{}   {outcome}", port.name)),
+                    Ok(outcome) => {
+                        outcomes.push(outcome);
+                        ui.result(&port.name, outcome);
+                    }
                     Err(error) => {
                         failures += 1;
                         ui.error(&format!("{}: {error:#}", port.name));
@@ -606,6 +638,16 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
             Err(error) => ui.warning(&format!("{}: {error:#}", port.name)),
         }
     }
+    let skipped = outcomes
+        .iter()
+        .filter(|outcome| matches!(**outcome, "skipped" | "would skip"))
+        .count();
+    ui.summary(
+        outcomes.len() - skipped,
+        skipped,
+        failures,
+        matches!(args.command, Some(Command::Plan)),
+    );
     ensure!(
         failures == 0,
         "{failures} board operation(s) failed; see the log"
@@ -641,6 +683,9 @@ fn main() {
             .unwrap_or_else(|| PathBuf::from("."))
     });
     let log_path = logging::start(&root);
+    if !matches!(args.command, Some(Command::Probe)) {
+        ui.title();
+    }
     let manual_update = matches!(args.command, Some(Command::SelfUpdate));
     let automatic_update =
         ui.interactive && args.command.is_none() && !args.offline && !args.no_self_update;

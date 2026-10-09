@@ -113,6 +113,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $executable --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($IsWindows) {
+            $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
+            if ($info.ProductName -ne 'micropython-esp-flasher') { throw 'Missing Windows version resource.' }
+            Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class MPFlashResource {
+              [DllImport("shell32.dll", EntryPoint="ExtractIconExW", CharSet=CharSet.Unicode)]
+              public static extern uint Count(string file, int index, IntPtr large, IntPtr small, uint count);
+          }
+          '@
+            if ([MPFlashResource]::Count($executable, -1, [IntPtr]::Zero, [IntPtr]::Zero, 0) -lt 1) {
+              throw 'Missing embedded Windows icon.'
+            }
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: micropython-esp-flasher-${{ matrix.platform }}-${{ matrix.arch }}

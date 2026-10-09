@@ -6,7 +6,7 @@ use crossterm::{
         MouseButton, MouseEventKind,
     },
     execute,
-    style::{Color, Print, ResetColor, SetForegroundColor},
+    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType},
 };
 use espflash::target::ProgressCallbacks;
@@ -23,6 +23,7 @@ pub struct Item {
     pub label: String,
     pub hint: String,
     pub key: char,
+    pub dangerous: bool,
 }
 
 impl Item {
@@ -31,7 +32,12 @@ impl Item {
             key,
             label: label.into(),
             hint: hint.into(),
+            dangerous: false,
         }
+    }
+    pub fn danger(mut self) -> Self {
+        self.dangerous = true;
+        self
     }
 }
 
@@ -90,13 +96,20 @@ impl Ui {
     }
     pub fn title(&self) {
         self.line(
-            "micropython-esp-flasher   MicroPython for ESP32 boards",
+            &format!("micropython-esp-flasher {}", env!("CARGO_PKG_VERSION")),
             Color::Cyan,
         );
-        self.line(
-            "────────────────────────────────────────────────────────────",
-            Color::DarkGrey,
-        );
+        self.line("MicroPython for ESP32 boards", Color::Grey);
+        self.rule();
+    }
+    fn rule(&self) {
+        let width = terminal::size().map_or(68, |(cols, _)| usize::from(cols).saturating_sub(4));
+        self.line(&"─".repeat(width.min(68)), Color::DarkGrey);
+    }
+    pub fn section(&self, title: &str) {
+        println!();
+        self.line(title, Color::Cyan);
+        self.rule();
     }
     pub fn line(&self, text: &str, color: Color) {
         log::info!("{text}");
@@ -112,7 +125,58 @@ impl Ui {
         }
     }
     pub fn step(&self, label: &str, value: impl AsRef<str>) {
-        self.line(&format!("● {label:<10}{}", value.as_ref()), Color::Grey);
+        let color = match label {
+            "ready" | "verified" => Color::Green,
+            "skip" => Color::Grey,
+            "connect" | "writing" | "verify" | "tool" => Color::Cyan,
+            _ => Color::White,
+        };
+        self.field(label, value.as_ref(), color);
+    }
+    fn field(&self, label: &str, value: &str, color: Color) {
+        log::info!("{label:<12} {value}");
+        if self.interactive {
+            let _ = execute!(
+                io::stdout(),
+                SetForegroundColor(Color::Grey),
+                Print(format!("  {label:<12} ")),
+                SetForegroundColor(color),
+                Print(format!("{value}\n")),
+                ResetColor
+            );
+        } else {
+            println!("  {label:<12} {value}");
+        }
+    }
+    pub fn result(&self, port: &str, outcome: &str) {
+        let color = match outcome {
+            "skipped" | "would skip" => Color::Grey,
+            "would flash" => Color::Cyan,
+            _ => Color::Green,
+        };
+        self.field("result", &format!("{port}   {outcome}"), color);
+    }
+    pub fn summary(&self, written: usize, skipped: usize, failed: usize, preview: bool) {
+        self.section(if preview {
+            "Plan summary"
+        } else {
+            "Run summary"
+        });
+        self.field(
+            if preview { "Would write" } else { "Written" },
+            &written.to_string(),
+            if preview { Color::Cyan } else { Color::Green },
+        );
+        self.field(
+            if preview { "Would skip" } else { "Skipped" },
+            &skipped.to_string(),
+            Color::Grey,
+        );
+        self.field(
+            "Failed",
+            &failed.to_string(),
+            if failed > 0 { Color::Red } else { Color::Grey },
+        );
     }
     pub fn warning(&self, text: &str) {
         self.line(text, Color::Yellow);
@@ -120,15 +184,12 @@ impl Ui {
     pub fn error(&self, text: &str) {
         self.line(text, Color::Red);
     }
-    pub fn card(&self, title: &str, version: &str, details: &str) {
+    pub fn card(&self, title: &str, fields: &[(&str, &str, Color)]) {
+        self.section(title);
+        for (label, value, color) in fields {
+            self.field(label, value, *color);
+        }
         println!();
-        self.line(&format!("┌─ {title}"), Color::Cyan);
-        self.line(&format!("│  {version}"), Color::White);
-        self.line(&format!("│  {details}"), Color::DarkGrey);
-        self.line(
-            "└───────────────────────────────────────────────────────────",
-            Color::DarkGrey,
-        );
     }
     pub fn countdown(&self, action: &str) -> Result<bool> {
         ensure!(
@@ -186,7 +247,12 @@ impl Ui {
             self.interactive,
             "This choice needs a terminal; specify a port, variant or erase action explicitly"
         );
-        self.line(title, Color::Yellow);
+        self.line(title, Color::Cyan);
+        let label_width = items
+            .iter()
+            .map(|item| item.label.chars().count())
+            .max()
+            .unwrap_or(0);
         let _input = Input::start()?;
         let mut selected = default.min(items.len() - 1);
         let mut drawn = false;
@@ -202,18 +268,31 @@ impl Ui {
                 execute!(
                     io::stdout(),
                     Clear(ClearType::CurrentLine),
-                    SetForegroundColor(if index == selected {
+                    SetForegroundColor(if item.dangerous {
+                        Color::Red
+                    } else if index == selected {
                         Color::Cyan
                     } else {
-                        Color::DarkGrey
+                        Color::Grey
+                    }),
+                    SetAttribute(if index == selected {
+                        Attribute::Bold
+                    } else {
+                        Attribute::NormalIntensity
                     }),
                     Print(format!(
-                        "  {} {}  {}   {}\r\n",
+                        "  {} [{}] {:label_width$}",
                         if index == selected { "►" } else { " " },
                         item.key,
-                        item.label,
-                        item.hint
+                        item.label
                     )),
+                    SetAttribute(Attribute::NormalIntensity),
+                    SetForegroundColor(if item.dangerous {
+                        Color::Yellow
+                    } else {
+                        Color::Grey
+                    }),
+                    Print(format!("  {}\r\n", item.hint)),
                     ResetColor
                 )?;
             }

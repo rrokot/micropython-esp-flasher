@@ -1,4 +1,4 @@
-# micropython-esp-flasher
+# <img src="assets/mpflash.svg" width="32" height="32" alt=""> micropython-esp-flasher
 
 Install or update MicroPython on ESP32 boards from Windows, Linux, or macOS.
 
@@ -29,8 +29,8 @@ On Ubuntu or Debian, add your account to the `dialout` group, then log out and l
 
 The tool waits 5 seconds before it writes firmware or skips a board.
 Press a key or click during this time to open the menu.
-Select `flash`, `erase + flash`, `other build`, or `skip`.
-`erase + flash` deletes all files on the board.
+Select `Install`, `Erase and install`, `Choose build`, or `Skip`.
+`Erase and install` deletes all files on the board.
 
 At normal startup, the tool checks for a new version and restarts after an update.
 Use `--no-self-update` to disable this check, or `self-update` to update the tool directly.

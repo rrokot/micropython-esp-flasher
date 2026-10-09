@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="micropython-esp-flasher: microchip and lightning bolt">
+  <rect x="4" y="4" width="248" height="248" rx="52" fill="#10202c"/>
+  <g fill="#67e8f9">
+    <rect x="52" y="52" width="152" height="152" rx="24"/>
+    <path d="M76 32h16v24H76zm44 0h16v24h-16zm44 0h16v24h-16zM76 200h16v24H76zm44 0h16v24h-16zm44 0h16v24h-16zM32 76h24v16H32zm0 44h24v16H32zm0 44h24v16H32zM200 76h24v16h-24zm0 44h24v16h-24zm0 44h24v16h-24z"/>
+  </g>
+  <rect x="68" y="68" width="120" height="120" rx="12" fill="#10202c"/>
+  <path d="M137 76 92 136h31l-7 44 49-65h-32z" fill="#fbbf24"/>
+</svg>
