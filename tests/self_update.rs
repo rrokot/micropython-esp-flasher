@@ -19,16 +19,21 @@ fn hash(path: &std::path::Path) -> String {
 
 #[test]
 fn helper_waits_for_the_running_program_replaces_it_and_restarts() {
-    exercise_update(false);
+    exercise_update(false, false);
 }
 
 #[cfg(windows)]
 #[test]
 fn interactive_update_keeps_the_original_windows_console() {
-    exercise_update(true);
+    exercise_update(true, false);
 }
 
-fn exercise_update(interactive: bool) {
+#[test]
+fn update_from_an_older_release_accepts_its_restart_arguments() {
+    exercise_update(false, true);
+}
+
+fn exercise_update(interactive: bool, legacy: bool) {
     let root = tempfile::tempdir().unwrap();
     let exe = if cfg!(windows) {
         "micropython-esp-flasher.exe"
@@ -122,11 +127,16 @@ fn exercise_update(interactive: bool) {
     };
     let old_hash = hash(&target);
     let new_hash = hash(&candidate);
+    let args = if legacy {
+        vec!["--no-self-update", "--version"]
+    } else {
+        vec!["--version"]
+    };
     let request = serde_json::json!({
         "target": fs::canonicalize(&target).unwrap(), "parent_pid": parent_pid,
         "version": env!("CARGO_PKG_VERSION"), "previous_version": "0.4.0",
         "previous_digest": old_hash, "new_digest": new_hash,
-        "args": ["--version"], "working_dir": root.path(), "interactive": interactive
+        "args": args, "working_dir": root.path(), "interactive": interactive
     });
     fs::write(
         stage.path().join("request.json"),
@@ -178,21 +188,5 @@ fn exercise_update(interactive: bool) {
             .status()
             .unwrap()
             .success()
-    );
-}
-
-#[test]
-fn offline_update_returns_before_connecting_to_any_board() {
-    let root = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_micropython-esp-flasher"))
-        .arg("--data-dir")
-        .arg(root.path())
-        .args(["--port", "NOT-A-PORT", "--offline", "self-update"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("Tool updates are disabled in offline mode")
     );
 }

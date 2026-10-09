@@ -566,7 +566,6 @@ fn restart_command(request: &Request, stage: &Path, pid: u32) -> Command {
         .arg(FINISH)
         .arg(stage)
         .arg(pid.to_string())
-        .arg("--no-self-update")
         .args(&request.args)
         .current_dir(&request.working_dir);
     #[cfg(windows)]
@@ -793,9 +792,9 @@ fn cleanup(stage: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn startup_args(mut args: Vec<OsString>) -> Result<Vec<OsString>> {
+pub fn startup_args(mut args: Vec<OsString>) -> Result<(Vec<OsString>, bool)> {
     if args.get(1).is_none_or(|arg| arg != FINISH) {
-        return Ok(args);
+        return Ok((args, false));
     }
     ensure!(args.len() >= 4, "Invalid tool update restart arguments");
     let stage = Path::new(&args[2]);
@@ -823,7 +822,11 @@ pub fn startup_args(mut args: Vec<OsString>) -> Result<Vec<OsString>> {
         eprintln!("Tool update finished; temporary files could not be removed: {error:#}");
     }
     args.drain(1..4);
-    Ok(args)
+    // Releases through 0.5.2 insert this argument when they restart after an update.
+    if args.get(1).is_some_and(|arg| arg == "--no-self-update") {
+        args.remove(1);
+    }
+    Ok((args, true))
 }
 
 #[cfg(test)]

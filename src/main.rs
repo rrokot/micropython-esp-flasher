@@ -34,9 +34,6 @@ struct Args {
     /// Use cached firmware without network requests
     #[arg(long, global = true)]
     offline: bool,
-    /// Do not check for a new tool version at startup
-    #[arg(long, global = true)]
-    no_self_update: bool,
     /// Accept normal flash/skip actions without a countdown (does not permit an implicit erase)
     #[arg(long, short = 'y', global = true)]
     yes: bool,
@@ -49,8 +46,6 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Update this tool from GitHub Releases without connecting to boards
-    SelfUpdate,
     /// Read connected boards without writing firmware; print JSON
     Probe,
     /// Show the selected firmware and action without writing firmware
@@ -671,7 +666,7 @@ fn main() {
         }
         return;
     }
-    let raw = match self_update::startup_args(raw) {
+    let (raw, updated) = match self_update::startup_args(raw) {
         Ok(raw) => raw,
         Err(error) => {
             eprintln!("Tool update restart failed: {error:#}");
@@ -690,28 +685,18 @@ fn main() {
     if !matches!(args.command, Some(Command::Probe)) {
         ui.title();
     }
-    let manual_update = matches!(args.command, Some(Command::SelfUpdate));
-    let automatic_update =
-        ui.interactive && args.command.is_none() && !args.offline && !args.no_self_update;
-    let mut update_result = Ok(());
-    if manual_update || automatic_update {
+    if ui.interactive && args.command.is_none() && !args.offline && !updated {
         let result = (|| {
-            ensure!(!args.offline, "Tool updates are disabled in offline mode");
-            let restart_args = if manual_update {
-                vec!["--version".to_owned()]
-            } else {
-                raw.iter()
-                    .skip(1)
-                    .map(|arg| {
-                        arg.to_str()
-                            .map(str::to_owned)
-                            .context("Tool update cannot preserve a non-UTF-8 argument")
-                    })
-                    .collect::<Result<_>>()?
-            };
-            self_update::update(restart_args, !manual_update && ui.interactive, |text| {
-                ui.step("tool", text)
-            })
+            let restart_args = raw
+                .iter()
+                .skip(1)
+                .map(|arg| {
+                    arg.to_str()
+                        .map(str::to_owned)
+                        .context("Tool update cannot preserve a non-UTF-8 argument")
+                })
+                .collect::<Result<_>>()?;
+            self_update::update(restart_args, ui.interactive, |text| ui.step("tool", text))
         })();
         match result {
             Ok(true) => {
@@ -719,17 +704,12 @@ fn main() {
                 std::process::exit(0);
             }
             Ok(false) => (),
-            Err(error) if automatic_update => ui.warning(&format!(
+            Err(error) => ui.warning(&format!(
                 "Tool update unavailable; using this version: {error:#}"
             )),
-            Err(error) => update_result = Err(error),
         }
     }
-    let result = if manual_update {
-        update_result
-    } else {
-        run(&args, &root, &ui)
-    };
+    let result = run(&args, &root, &ui);
     if let Err(error) = &result {
         if matches!(args.command, Some(Command::Probe)) {
             eprintln!("{error:#}");
@@ -744,7 +724,7 @@ fn main() {
                 crossterm::style::Color::DarkGrey,
             );
         }
-        if !args.no_pause && !manual_update {
+        if !args.no_pause {
             let _ = ui.pause();
         }
     }

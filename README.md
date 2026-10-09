@@ -32,8 +32,6 @@ Select `Install`, `Erase and install`, `Choose build`, or `Skip`.
 `Erase and install` deletes all files on the board.
 
 At normal startup, the tool checks for a new version and restarts after an update.
-Use `--no-self-update` to disable this check, or `self-update` to update the tool directly.
-`--offline` also disables the update check.
 
 To report a problem, include the log file from the `logs` folder.
 
