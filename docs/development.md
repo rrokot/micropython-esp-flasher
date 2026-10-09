@@ -1,7 +1,6 @@
 # Rust development
 
-The `rust` branch builds a native application with the espflash library.
-The PowerShell version remains on `master`.
+The program is a native application with the espflash library.
 
 ## Build and test
 
@@ -97,4 +96,4 @@ The workflow uploads a ZIP for Windows and a `tar.gz` for Linux and macOS.
 Each archive contains the executable, README, illustration, project license and dependency license notices.
 Each artifact also contains a SHA-256 checksum file.
 CI extracts each archive and runs the executable to check the package and its file permissions.
-The artifact is a development build; it does not replace the current GitHub release.
+CI artifacts are development builds. Published versions are available on the GitHub Releases page.

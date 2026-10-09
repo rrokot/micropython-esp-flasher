@@ -17,7 +17,7 @@ The tool can:
 
 ## Usage
 
-1. Download the archive for your system from the [Rust build](https://github.com/rrokot/micropython-esp-flasher/actions/workflows/rust.yml).
+1. Download the archive for your system from the [latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest).
 2. Extract the archive.
 3. Connect your boards to the computer.
 4. On Windows, double-click `micropython-esp-flasher.exe`. On Linux or macOS, open a terminal in the tool folder and run `./micropython-esp-flasher`.
