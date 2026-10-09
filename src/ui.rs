@@ -99,7 +99,6 @@ impl Ui {
             &format!("micropython-esp-flasher {}", env!("CARGO_PKG_VERSION")),
             Color::Cyan,
         );
-        self.line("MicroPython for ESP32 boards", Color::Grey);
         self.rule();
     }
     fn rule(&self) {

@@ -1,39 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="610" viewBox="0 0 880 610" role="img" aria-label="micropython-esp-flasher: board details and firmware countdown">
-<rect width="880" height="610" rx="12" fill="#0c0c0c"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="588" viewBox="0 0 880 588" role="img" aria-label="micropython-esp-flasher: board details and firmware countdown">
+<rect width="880" height="588" rx="12" fill="#0c0c0c"/>
 <g font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="15" xml:space="preserve">
-<text x="35" y="58" fill="#61d6d6">micropython-esp-flasher 0.5.1</text>
-<text x="35" y="80" fill="#cccccc">MicroPython for ESP32 boards</text>
-<text x="35" y="102" fill="#767676">────────────────────────────────────────────────────────────────────</text>
-<text x="35" y="144" fill="#61d6d6">Device · COM5</text>
-<text x="35" y="166" fill="#767676">────────────────────────────────────────────────────────────────────</text>
-<text x="35" y="188" fill="#cccccc">port</text>
-<text x="152" y="188" fill="#f2f2f2">COM5</text>
-<text x="35" y="210" fill="#cccccc">USB ID</text>
-<text x="152" y="210" fill="#f2f2f2">10c4:ea60</text>
-<text x="35" y="232" fill="#cccccc">serial</text>
-<text x="152" y="232" fill="#f2f2f2">9E655A22FB1AEF11A9C416764909FFD0</text>
-<text x="35" y="254" fill="#cccccc">repl</text>
-<text x="152" y="254" fill="#f2f2f2">MicroPython 1.29.0   Generic ESP32S3 module with ESP32-S3</text>
-<text x="35" y="276" fill="#cccccc">chip</text>
-<text x="152" y="276" fill="#f2f2f2">esp32s3   8MB flash   2MB PSRAM</text>
-<text x="35" y="298" fill="#cccccc">MAC</text>
-<text x="152" y="298" fill="#f2f2f2">d8:3b:da:54:5f:94</text>
-<text x="35" y="320" fill="#cccccc">build</text>
-<text x="152" y="320" fill="#f2f2f2">ESP32_GENERIC_S3</text>
-<text x="35" y="342" fill="#cccccc">filesystem</text>
-<text x="152" y="342" fill="#f2f2f2">0x200000</text>
-<text x="35" y="384" fill="#cccccc">catalog</text>
-<text x="152" y="384" fill="#f2f2f2">asking micropython.org</text>
-<text x="35" y="426" fill="#61d6d6">COM5 · esp32s3</text>
-<text x="35" y="448" fill="#767676">────────────────────────────────────────────────────────────────────</text>
-<text x="35" y="470" fill="#cccccc">MicroPython</text>
-<text x="152" y="470" fill="#f2f2f2">1.29.0 → 1.29.0</text>
-<text x="35" y="492" fill="#cccccc">Build</text>
-<text x="152" y="492" fill="#f2f2f2">ESP32_GENERIC_S3</text>
-<text x="35" y="514" fill="#cccccc">Status</text>
-<text x="152" y="514" fill="#16c60c">up to date</text>
-<text x="35" y="536" fill="#cccccc">Firmware</text>
-<text x="152" y="536" fill="#cccccc">cached</text>
-<text x="35" y="580" fill="#61d6d6">► skip in 4 s   press a key or click for options</text>
+<text x="35" y="58" fill="#61d6d6">micropython-esp-flasher 0.5.2</text>
+<text x="35" y="80" fill="#767676">────────────────────────────────────────────────────────────────────</text>
+<text x="35" y="122" fill="#61d6d6">Device · COM5</text>
+<text x="35" y="144" fill="#767676">────────────────────────────────────────────────────────────────────</text>
+<text x="35" y="166" fill="#cccccc">port</text>
+<text x="152" y="166" fill="#f2f2f2">COM5</text>
+<text x="35" y="188" fill="#cccccc">USB ID</text>
+<text x="152" y="188" fill="#f2f2f2">10c4:ea60</text>
+<text x="35" y="210" fill="#cccccc">serial</text>
+<text x="152" y="210" fill="#f2f2f2">9E655A22FB1AEF11A9C416764909FFD0</text>
+<text x="35" y="232" fill="#cccccc">repl</text>
+<text x="152" y="232" fill="#f2f2f2">MicroPython 1.29.0   Generic ESP32S3 module with ESP32-S3</text>
+<text x="35" y="254" fill="#cccccc">chip</text>
+<text x="152" y="254" fill="#f2f2f2">esp32s3   8MB flash   2MB PSRAM</text>
+<text x="35" y="276" fill="#cccccc">MAC</text>
+<text x="152" y="276" fill="#f2f2f2">d8:3b:da:54:5f:94</text>
+<text x="35" y="298" fill="#cccccc">build</text>
+<text x="152" y="298" fill="#f2f2f2">ESP32_GENERIC_S3</text>
+<text x="35" y="320" fill="#cccccc">filesystem</text>
+<text x="152" y="320" fill="#f2f2f2">0x200000</text>
+<text x="35" y="362" fill="#cccccc">catalog</text>
+<text x="152" y="362" fill="#f2f2f2">asking micropython.org</text>
+<text x="35" y="404" fill="#61d6d6">COM5 · esp32s3</text>
+<text x="35" y="426" fill="#767676">────────────────────────────────────────────────────────────────────</text>
+<text x="35" y="448" fill="#cccccc">MicroPython</text>
+<text x="152" y="448" fill="#f2f2f2">1.29.0 → 1.29.0</text>
+<text x="35" y="470" fill="#cccccc">Build</text>
+<text x="152" y="470" fill="#f2f2f2">ESP32_GENERIC_S3</text>
+<text x="35" y="492" fill="#cccccc">Status</text>
+<text x="152" y="492" fill="#16c60c">up to date</text>
+<text x="35" y="514" fill="#cccccc">Firmware</text>
+<text x="152" y="514" fill="#cccccc">cached</text>
+<text x="35" y="558" fill="#61d6d6">► skip in 4 s   press a key or click for options</text>
 </g>
 </svg>
