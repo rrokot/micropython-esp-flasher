@@ -1,32 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="544" viewBox="0 0 880 544" role="img" aria-label="micropython-esp-flasher: board details and firmware countdown">
-<rect width="880" height="544" rx="12" fill="#0c0c0c"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="356" viewBox="0 0 880 356" role="img" aria-label="micropython-esp-flasher: board details and firmware countdown">
+<rect width="880" height="356" rx="12" fill="#0c0c0c"/>
 <g font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="15" xml:space="preserve">
-<text x="35" y="58" fill="#61d6d6">micropython-esp-flasher 0.5.3</text>
+<text x="35" y="58" fill="#61d6d6">micropython-esp-flasher 0.6.0</text>
 <text x="35" y="80" fill="#767676">────────────────────────────────────────────────────────────────────</text>
 <text x="35" y="122" fill="#61d6d6">COM5</text>
 <text x="35" y="144" fill="#767676">────────────────────────────────────────────────────────────────────</text>
-<text x="35" y="188" fill="#cccccc">repl</text>
-<text x="152" y="188" fill="#f2f2f2">MicroPython 1.29.0   Generic ESP32S3 module with ESP32-S3</text>
-<text x="35" y="210" fill="#cccccc">chip</text>
-<text x="152" y="210" fill="#f2f2f2">esp32s3   8MB flash   2MB PSRAM</text>
-<text x="35" y="232" fill="#cccccc">MAC</text>
-<text x="152" y="232" fill="#f2f2f2">d8:3b:da:54:5f:94</text>
-<text x="35" y="254" fill="#cccccc">build</text>
-<text x="152" y="254" fill="#f2f2f2">ESP32_GENERIC_S3</text>
-<text x="35" y="276" fill="#cccccc">filesystem</text>
-<text x="152" y="276" fill="#f2f2f2">0x200000</text>
-<text x="35" y="318" fill="#cccccc">catalog</text>
-<text x="152" y="318" fill="#f2f2f2">asking micropython.org</text>
-<text x="35" y="360" fill="#61d6d6">Firmware plan</text>
-<text x="35" y="382" fill="#767676">────────────────────────────────────────────────────────────────────</text>
-<text x="35" y="404" fill="#cccccc">MicroPython</text>
-<text x="152" y="404" fill="#f2f2f2">1.29.0 → 1.29.0</text>
-<text x="35" y="426" fill="#cccccc">Build</text>
-<text x="152" y="426" fill="#f2f2f2">ESP32_GENERIC_S3</text>
-<text x="35" y="448" fill="#cccccc">Status</text>
-<text x="152" y="448" fill="#16c60c">up to date</text>
-<text x="35" y="470" fill="#cccccc">Firmware</text>
-<text x="152" y="470" fill="#cccccc">cached</text>
-<text x="35" y="514" fill="#61d6d6">► skip in 4 s   press a key or click for options</text>
+<text x="35" y="188" fill="#cccccc">chip</text>
+<text x="152" y="188" fill="#f2f2f2">esp32s3 · 8 MB flash · 2 MB PSRAM</text>
+<text x="35" y="210" fill="#cccccc">mac</text>
+<text x="152" y="210" fill="#f2f2f2">d8:3b:da:54:5f:94</text>
+<text x="35" y="232" fill="#cccccc">installed</text>
+<text x="152" y="232" fill="#f2f2f2">MicroPython 1.28.0 · ESP32_GENERIC_S3</text>
+<text x="35" y="254" fill="#cccccc">firmware</text>
+<text x="152" y="254" fill="#f2f2f2">1.29.0 · ESP32_GENERIC_S3 · cached</text>
+<text x="35" y="276" fill="#cccccc">status</text>
+<text x="152" y="276" fill="#61d6d6">update available</text>
+<text x="35" y="320" fill="#61d6d6">► Installing 1.29.0 in 4 s<tspan fill="#767676"> · any key or click for options</tspan></text>
 </g>
 </svg>

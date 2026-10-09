@@ -20,11 +20,11 @@ impl Change {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Install => "install",
-            Self::Update => "update",
-            Self::WrongBuild => "wrong build",
+            Self::Install => "install needed",
+            Self::Update => "update available",
+            Self::WrongBuild => "wrong build for this hardware",
             Self::UpToDate => "up to date",
-            Self::Newer => "newer version",
+            Self::Newer => "newer than the catalog",
         }
     }
 }

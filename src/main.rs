@@ -8,7 +8,7 @@ mod self_update;
 mod ui;
 
 use anyhow::{Context, Result, bail, ensure};
-use catalog::{Builds, Catalog};
+use catalog::{Build, Builds, Catalog};
 use clap::{Parser, Subcommand};
 use device::{Connected, Hardware, PortInfo};
 use plan::Change;
@@ -16,11 +16,12 @@ use repl::Running;
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
-use ui::{Item, Progress, Ui};
+use ui::{Item, Progress, Tone, Ui};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Install and update MicroPython on ESP32 boards")]
@@ -69,7 +70,7 @@ enum Command {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct Target {
     port: PortInfo,
     hardware: Hardware,
@@ -82,6 +83,99 @@ struct FlashOptions<'a> {
     erase: bool,
     variant: Option<&'a str>,
 }
+
+/// A board with the firmware build selected for it.
+struct Job {
+    target: Target,
+    builds: Builds,
+    online: bool,
+    variant: String,
+}
+
+impl Job {
+    fn board(&self) -> &str {
+        &self.target.hardware.board
+    }
+    fn port(&self) -> &str {
+        &self.target.port.name
+    }
+    fn build(&self) -> &Build {
+        &self.builds[&self.variant]
+    }
+    fn change(&self) -> Change {
+        plan::classify(self.board(), self.target.running.as_ref(), self.build())
+    }
+    fn needed(&self, options: FlashOptions<'_>) -> bool {
+        self.change().needed() || options.force || options.erase || options.variant.is_some()
+    }
+    fn default_action(&self, options: FlashOptions<'_>) -> Action {
+        if self.needed(options) {
+            Action::Flash {
+                erase: options.erase,
+            }
+        } else {
+            Action::Skip
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Action {
+    Skip,
+    Flash { erase: bool },
+}
+
+#[derive(Clone, Copy)]
+enum Outcome {
+    Installed,
+    Updated,
+    BuildFixed,
+    Reflashed,
+    Skipped,
+    WouldFlash,
+    WouldSkip,
+}
+
+impl Outcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Updated => "updated",
+            Self::BuildFixed => "build fixed",
+            Self::Reflashed => "flashed again",
+            Self::Skipped => "skipped",
+            Self::WouldFlash => "would flash",
+            Self::WouldSkip => "would skip",
+        }
+    }
+    fn tone(self) -> Tone {
+        match self {
+            Self::Skipped | Self::WouldSkip => Tone::Muted,
+            Self::WouldFlash => Tone::Active,
+            _ => Tone::Good,
+        }
+    }
+}
+
+/// The user closed the program while it waited for a board.
+#[derive(Debug)]
+struct Closed;
+impl std::fmt::Display for Closed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Closed while waiting for a board")
+    }
+}
+impl std::error::Error for Closed {}
+
+/// Board errors were already shown next to their boards.
+#[derive(Debug)]
+struct Shown(usize);
+impl std::fmt::Display for Shown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} board operation(s) failed", self.0)
+    }
+}
+impl std::error::Error for Shown {}
 
 fn inspect(port: &PortInfo) -> Result<Target> {
     ensure!(
@@ -106,6 +200,16 @@ fn inspect(port: &PortInfo) -> Result<Target> {
     })
 }
 
+/// Splits detected ports into known ESP32 adapters and other adapters.
+fn split_ports(ports: Vec<PortInfo>) -> (Vec<PortInfo>, Vec<PortInfo>) {
+    let known = ports.iter().filter(|port| port.known).cloned().collect();
+    let unknown = ports
+        .into_iter()
+        .filter(|port| !port.known && !port.firmware_usb)
+        .collect();
+    (known, unknown)
+}
+
 fn select_ports(args: &Args) -> Result<(Vec<PortInfo>, Vec<PortInfo>)> {
     let ports = device::ports()?;
     if !args.port.is_empty() {
@@ -121,18 +225,42 @@ fn select_ports(args: &Args) -> Result<(Vec<PortInfo>, Vec<PortInfo>)> {
         }
         return Ok((selected, Vec::new()));
     }
-    let known = ports.iter().filter(|port| port.known).cloned().collect();
-    let unknown = ports
-        .into_iter()
-        .filter(|port| !port.known && !port.firmware_usb)
-        .collect();
-    Ok((known, unknown))
+    Ok(split_ports(ports))
 }
 
-fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Target>, usize) {
+fn missing_board(ports: &[PortInfo]) -> String {
+    ports
+        .iter()
+        .find(|port| port.firmware_usb)
+        .map_or("Connect an ESP32 board".into(), |port| {
+            format!(
+                "{} is the firmware USB port: hold BOOT, tap RESET, release BOOT",
+                port.name
+            )
+        })
+}
+
+fn wait_board(ui: &Ui) -> Result<(Vec<PortInfo>, Vec<PortInfo>)> {
+    let found = ui
+        .wait(|| {
+            let ports = device::ports()?;
+            let (known, unknown) = split_ports(ports.clone());
+            Ok(if known.is_empty() && unknown.is_empty() {
+                ControlFlow::Continue(missing_board(&ports))
+            } else {
+                ControlFlow::Break((known, unknown))
+            })
+        })?
+        .ok_or(Closed)?;
+    // A new USB serial port can appear before its driver accepts connections.
+    thread::sleep(Duration::from_millis(500));
+    Ok(found)
+}
+
+fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Target>, Vec<String>) {
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
-    let mut failures = 0;
+    let mut failed = Vec::new();
     for port in ports {
         match inspect(port) {
             Ok(target) => {
@@ -140,9 +268,10 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
                     && !seen.insert(mac.clone())
                 {
                     if let Some(ui) = ui {
-                        ui.step(
+                        ui.field(
                             "skip",
                             format!("{} is another port of an already detected board", port.name),
+                            Tone::Muted,
                         );
                     }
                     continue;
@@ -153,11 +282,15 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
                 if !explicit && error.downcast_ref::<device::NoChip>().is_some() {
                     log::info!("{} skipped: {error:#}", port.name);
                     if let Some(ui) = ui {
-                        ui.step("skip", format!("{}: no supported ESP32 answer", port.name));
+                        ui.field(
+                            "skip",
+                            format!("{}: no supported ESP32 answer", port.name),
+                            Tone::Muted,
+                        );
                     }
                     continue;
                 }
-                failures += 1;
+                failed.push(port.name.clone());
                 log::error!("{}: {error:#}", port.name);
                 if let Some(ui) = ui {
                     ui.error(&format!("{}: {error:#}", port.name));
@@ -167,7 +300,7 @@ fn read_targets(ports: &[PortInfo], ui: Option<&Ui>, explicit: bool) -> (Vec<Tar
             }
         }
     }
-    (targets, failures)
+    (targets, failed)
 }
 
 fn show_target(target: &Target, ui: &Ui) {
@@ -180,39 +313,98 @@ fn show_target(target: &Target, ui: &Ui) {
     if let Some(serial) = &target.port.serial {
         log::info!("serial       {serial}");
     }
-    ui.step(
-        "repl",
-        target
-            .running
-            .as_ref()
-            .map_or("no MicroPython answer".into(), |r| {
-                format!("MicroPython {}   {}", r.version, r.machine)
-            }),
-    );
-    ui.step(
+    let hardware = &target.hardware;
+    let psram = if hardware.psram_mb > 0 {
+        format!("{} MB PSRAM", hardware.psram_mb)
+    } else if hardware.psram {
+        "PSRAM".into()
+    } else {
+        "no PSRAM".into()
+    };
+    ui.field(
         "chip",
         format!(
-            "{}   {}MB flash   {}MB PSRAM",
-            target.hardware.chip,
-            target.hardware.flash_size / 1024 / 1024,
-            target.hardware.psram_mb
+            "{} · {} MB flash · {psram}",
+            hardware.chip,
+            hardware.flash_size / 1024 / 1024
         ),
+        Tone::Normal,
     );
-    if let Some(mac) = &target.hardware.mac {
-        ui.step("MAC", mac);
+    if let Some(mac) = &hardware.mac {
+        ui.field("mac", mac, Tone::Normal);
     }
-    if let Some(running) = &target.running {
-        if !running.build.is_empty() {
-            ui.step("build", &running.build);
+    match &target.running {
+        Some(running) => {
+            ui.field(
+                "installed",
+                format!(
+                    "MicroPython {} · {}",
+                    running.version,
+                    if running.build.is_empty() {
+                        &running.machine
+                    } else {
+                        &running.build
+                    }
+                ),
+                Tone::Normal,
+            );
+            if let Some(filesystem) = running.filesystem {
+                log::info!("filesystem   0x{filesystem:x}");
+            }
         }
-        if let Some(filesystem) = running.filesystem {
-            ui.step("filesystem", format!("0x{filesystem:x}"));
-        }
+        None => ui.field("installed", "no MicroPython answer", Tone::Muted),
     }
 }
 
 fn variant_name(variant: &str) -> &str {
     if variant.is_empty() { "base" } else { variant }
+}
+
+fn build_name(board: &str, variant: &str) -> String {
+    if variant.is_empty() {
+        board.to_owned()
+    } else {
+        format!("{board}-{variant}")
+    }
+}
+
+fn show_plan(job: &Job, catalog: &Catalog, ui: &Ui) {
+    let build = job.build();
+    let name = build_name(job.board(), &job.variant);
+    if job.online {
+        ui.field(
+            "firmware",
+            format!(
+                "{} · {name} · {}",
+                build.version,
+                if catalog.cache.join(&build.name).is_file() {
+                    "cached"
+                } else {
+                    "will be downloaded"
+                }
+            ),
+            Tone::Normal,
+        );
+    } else {
+        ui.field(
+            "firmware",
+            format!(
+                "{} · {name} · offline, newer releases not checked",
+                build.version
+            ),
+            Tone::Warn,
+        );
+    }
+    let change = job.change();
+    ui.field(
+        "status",
+        change.label(),
+        match change {
+            Change::UpToDate => Tone::Good,
+            Change::WrongBuild | Change::Newer => Tone::Warn,
+            Change::Install | Change::Update => Tone::Active,
+        },
+    );
 }
 
 fn choose_variant(ui: &Ui, builds: &Builds, default: &str) -> Result<Option<String>> {
@@ -237,9 +429,9 @@ fn choose_variant(ui: &Ui, builds: &Builds, default: &str) -> Result<Option<Stri
         .map(|i| variants[i].clone()))
 }
 
-fn erase_confirm(ui: &Ui) -> Result<bool> {
+fn erase_confirm(ui: &Ui, title: &str) -> Result<bool> {
     Ok(ui.choose(
-        "Erase the whole chip? All files will be deleted.",
+        title,
         &[
             Item::new('c', "Cancel", "Keep board files"),
             Item::new('e', "Erase and install", "Deletes all board files").danger(),
@@ -248,6 +440,8 @@ fn erase_confirm(ui: &Ui) -> Result<bool> {
         Some(0),
     )? == Some(1))
 }
+
+const ERASE: &str = "Erase the whole chip? All files will be deleted.";
 
 fn wait_port(previous: &PortInfo) -> Result<PortInfo> {
     let start = Instant::now();
@@ -283,7 +477,11 @@ fn flash(target: &Target, path: &Path, erase: bool, ui: &Ui) -> Result<()> {
     );
     let mut last = None;
     for baud in [2_000_000, 921_600, 460_800, 115_200] {
-        ui.step("connect", format!("{baud} baud"));
+        if last.is_none() {
+            ui.field("connect", format!("{baud} baud"), Tone::Active);
+        } else {
+            ui.field("retry", format!("{baud} baud"), Tone::Muted);
+        }
         let result = (|| -> Result<()> {
             let mut connected = Connected::open(&target.port, Some(baud))?;
             let actual = connected.hardware(target.running.as_ref())?;
@@ -300,7 +498,7 @@ fn flash(target: &Target, path: &Path, erase: bool, ui: &Ui) -> Result<()> {
         match result {
             Ok(()) => return Ok(()),
             Err(error) => {
-                ui.warning(&format!("Attempt at {baud} baud failed: {error:#}"));
+                log::warn!("Attempt at {baud} baud failed: {error:#}");
                 last = Some(error);
             }
         }
@@ -308,17 +506,26 @@ fn flash(target: &Target, path: &Path, erase: bool, ui: &Ui) -> Result<()> {
     Err(last.unwrap()).context("Flashing failed at every baud rate")
 }
 
-fn update(
-    target: &Target,
-    builds: &Builds,
-    online: bool,
+/// Selects the build for a board and shows the board with its plan.
+/// Returns None when the user cancels the build choice.
+fn prepare(
+    target: Target,
+    catalogs: &mut HashMap<String, (Builds, bool)>,
     catalog: &Catalog,
     args: &Args,
     options: FlashOptions<'_>,
     ui: &Ui,
-) -> Result<&'static str> {
-    let board = &target.hardware.board;
-    let mut variant = if let Some(variant) = options.variant {
+) -> Result<Option<Job>> {
+    show_target(&target, ui);
+    let board = target.hardware.board.clone();
+    if !catalogs.contains_key(&board) {
+        if !args.offline {
+            ui.live("firmware", "checking micropython.org");
+        }
+        catalogs.insert(board.clone(), catalog.builds(&board)?);
+    }
+    let (builds, online) = catalogs[&board].clone();
+    let variant = if let Some(variant) = options.variant {
         let variant = if variant.eq_ignore_ascii_case("base") {
             ""
         } else {
@@ -330,156 +537,212 @@ fn update(
         );
         variant.to_owned()
     } else {
-        match catalog::select_variant(builds, &target.hardware.names(), online) {
+        match catalog::select_variant(&builds, &target.hardware.names(), online) {
             Ok(variant) => variant,
             Err(error) => {
                 ui.warning(&error.to_string());
                 if args.yes {
                     return Err(error);
                 }
-                let Some(variant) = choose_variant(ui, builds, "")? else {
-                    return Ok("skipped");
+                let Some(variant) = choose_variant(ui, &builds, "")? else {
+                    return Ok(None);
                 };
                 variant
             }
         }
     };
-    let mut automatic = true;
-    let (build, change, erase) = loop {
-        let build = &builds[&variant];
-        let change = plan::classify(board, target.running.as_ref(), build);
-        let from = target
-            .running
-            .as_ref()
-            .map_or("no MicroPython".into(), |r| {
-                plan::running_variant(board, r)
-                    .filter(|running| *running != variant)
-                    .map_or(r.version.clone(), |v| {
-                        format!("{} {}", r.version, variant_name(v))
-                    })
-            });
-        let selected_build = if variant.is_empty() {
-            board.clone()
-        } else {
-            format!("{board}-{variant}")
-        };
-        ui.card(
-            "Firmware plan",
-            &[
-                (
-                    "MicroPython",
-                    &format!("{from} → {}", build.version),
-                    crossterm::style::Color::White,
-                ),
-                ("Build", &selected_build, crossterm::style::Color::White),
-                (
-                    "Status",
-                    change.label(),
-                    match change {
-                        Change::UpToDate => crossterm::style::Color::Green,
-                        Change::WrongBuild | Change::Newer => crossterm::style::Color::Yellow,
-                        _ => crossterm::style::Color::Cyan,
-                    },
-                ),
-                (
-                    "Firmware",
-                    if catalog.cache.join(&build.name).is_file() {
-                        "cached"
-                    } else {
-                        "will be downloaded"
-                    },
-                    crossterm::style::Color::Grey,
-                ),
-            ],
-        );
-        let needed = change.needed() || options.force || options.erase || options.variant.is_some();
-        if matches!(args.command, Some(Command::Plan)) {
-            return Ok(if change.needed() {
-                "would flash"
+    let job = Job {
+        target,
+        builds,
+        online,
+        variant,
+    };
+    show_plan(&job, catalog, ui);
+    Ok(Some(job))
+}
+
+/// Asks what to do with one board: a countdown to the planned action, then a menu on request.
+fn decide(
+    job: &mut Job,
+    catalog: &Catalog,
+    args: &Args,
+    options: FlashOptions<'_>,
+    ui: &Ui,
+    title: &str,
+    countdown: bool,
+) -> Result<Action> {
+    if args.yes {
+        return Ok(job.default_action(options));
+    }
+    let mut automatic = countdown;
+    loop {
+        let needed = job.needed(options);
+        let version = job.build().version;
+        if automatic {
+            let (action, seconds) = if !needed {
+                ("Skipping".to_owned(), 3)
+            } else if options.erase {
+                (format!("Erasing and installing {version}"), 5)
             } else {
-                "would skip"
-            });
-        }
-        let action = if options.erase {
-            "erase and install".into()
-        } else if needed {
-            format!("install {}", build.version)
-        } else {
-            "skip".into()
-        };
-        let menu = if args.yes {
-            false
-        } else if automatic {
-            ui.countdown(&action)?
-        } else {
-            true
-        };
-        if !menu {
-            if !needed {
-                ui.step("skip", "nothing written");
-                return Ok("skipped");
+                (format!("Installing {version}"), 5)
+            };
+            if !ui.countdown(&action, seconds)? {
+                if options.erase && needed && !erase_confirm(ui, ERASE)? {
+                    return Ok(Action::Skip);
+                }
+                return Ok(job.default_action(options));
             }
-            if options.erase && !args.yes && !erase_confirm(ui)? {
-                return Ok("skipped");
-            }
-            break (build.clone(), change, options.erase);
         }
         automatic = false;
         let mut items = vec![
-            Item::new('f', format!("Install {}", build.version), "Write firmware"),
+            Item::new('f', format!("Install {version}"), "Write firmware"),
             Item::new('e', "Erase and install", "Deletes all board files").danger(),
         ];
-        if builds.len() > 1 {
+        if job.builds.len() > 1 {
             items.push(Item::new('v', "Choose build", "Select a firmware variant"));
         }
         items.push(Item::new('s', "Skip", "Keep the board as it is"));
         let skip = items.len() - 1;
         let choice = ui
-            .choose(
-                "Choose an action",
-                &items,
-                if needed { 0 } else { skip },
-                Some(skip),
-            )?
+            .choose(title, &items, if needed { 0 } else { skip }, Some(skip))?
             .unwrap_or(skip);
         match items[choice].key {
-            's' => return Ok("skipped"),
+            's' => return Ok(Action::Skip),
             'v' => {
-                if let Some(selected) = choose_variant(ui, builds, &variant)? {
-                    variant = selected;
+                if let Some(selected) = choose_variant(ui, &job.builds, &job.variant)? {
+                    job.variant = selected;
+                    show_plan(job, catalog, ui);
                 }
             }
             'e' => {
-                if erase_confirm(ui)? {
-                    break (build.clone(), change, true);
+                if erase_confirm(ui, ERASE)? {
+                    return Ok(Action::Flash { erase: true });
                 }
             }
-            _ => break (build.clone(), change, false),
+            _ => return Ok(Action::Flash { erase: false }),
         }
+    }
+}
+
+/// Asks once for several boards: one countdown to the whole plan, then a menu on request.
+fn decide_all(
+    jobs: &mut [Job],
+    catalog: &Catalog,
+    args: &Args,
+    options: FlashOptions<'_>,
+    ui: &Ui,
+) -> Result<Vec<Action>> {
+    let planned: Vec<_> = jobs.iter().map(|job| job.default_action(options)).collect();
+    if args.yes {
+        return Ok(planned);
+    }
+    let writes = jobs.iter().filter(|job| job.needed(options)).count();
+    let (action, seconds) = if writes == 0 {
+        ("Skipping all boards".to_owned(), 3)
+    } else if options.erase {
+        (
+            format!(
+                "Erasing and installing on {writes} of {} boards",
+                jobs.len()
+            ),
+            5,
+        )
+    } else {
+        (
+            format!("Installing on {writes} of {} boards", jobs.len()),
+            5,
+        )
     };
-    ui.step("firmware", &build.name);
-    let path = catalog.firmware(board, &build)?;
+    let choice = if ui.countdown(&action, seconds)? {
+        let items = [
+            Item::new(
+                'a',
+                "Apply the plan",
+                format!("Write {writes}, skip {}", jobs.len() - writes),
+            ),
+            Item::new('b', "Choose per board", "Pick an action for each board"),
+            Item::new('s', "Skip all", "Keep every board as it is"),
+        ];
+        ui.choose("Choose an action", &items, 0, Some(2))?
+            .map_or('s', |i| items[i].key)
+    } else {
+        'a'
+    };
+    match choice {
+        's' => Ok(vec![Action::Skip; jobs.len()]),
+        'b' => jobs
+            .iter_mut()
+            .map(|job| {
+                println!();
+                let title = format!(
+                    "{}: {} · {}",
+                    job.port(),
+                    job.change().label(),
+                    build_name(job.board(), &job.variant)
+                );
+                decide(job, catalog, args, options, ui, &title, false)
+            })
+            .collect(),
+        _ => {
+            if options.erase
+                && writes > 0
+                && !erase_confirm(
+                    ui,
+                    "Erase the whole chip on each board? All files will be deleted.",
+                )?
+            {
+                return Ok(vec![Action::Skip; jobs.len()]);
+            }
+            Ok(planned)
+        }
+    }
+}
+
+/// Writes the selected firmware and checks that the board runs it.
+fn execute(job: &Job, erase: bool, catalog: &Catalog, args: &Args, ui: &Ui) -> Result<Outcome> {
+    let board = job.board();
+    let build = job.build();
+    if !catalog.cache.join(&build.name).is_file() {
+        ui.live("download", &build.name);
+    }
+    let path = catalog.firmware(board, build)?;
+    ui.field(
+        "file",
+        format!(
+            "{} · {}",
+            build.name,
+            ui::megabytes(std::fs::metadata(&path)?.len())
+        ),
+        Tone::Normal,
+    );
     let image = image::Image::read(&path)?;
     let mut erase = erase;
     if !erase
-        && target
+        && job
+            .target
             .running
             .as_ref()
-            .is_some_and(|running| plan::files_move(board, running, &variant, image.filesystem))
+            .is_some_and(|running| plan::files_move(board, running, &job.variant, image.filesystem))
     {
         if args.yes {
             bail!(
                 "The new build may lose board files. Run interactively, or explicitly select flash --erase."
             );
         }
-        if !erase_confirm(ui)? {
-            return Ok("skipped");
+        if !erase_confirm(
+            ui,
+            &format!(
+                "{}: the new build keeps board files elsewhere; they will be lost. Erase the whole chip?",
+                job.port()
+            ),
+        )? {
+            return Ok(Outcome::Skipped);
         }
         erase = true;
     }
-    flash(target, &path, erase, ui)?;
-    ui.step("reboot", "waiting for the board");
-    let port = wait_port(&target.port)?;
+    flash(&job.target, &path, erase, ui)?;
+    ui.live("reboot", "waiting for the board");
+    let port = wait_port(&job.target.port)?;
     let running = repl::probe(&port.name, port.native())?
         .context("Firmware was written, but MicroPython did not answer; power-cycle the board")?;
     ensure!(
@@ -490,64 +753,93 @@ fn update(
     );
     if !running.build.is_empty() {
         ensure!(
-            plan::running_variant(board, &running) == Some(variant.as_str()),
+            plan::running_variant(board, &running) == Some(job.variant.as_str()),
             "The board reports build {}, expected {board}-{}",
             running.build,
-            variant_name(&variant)
+            variant_name(&job.variant)
         );
     }
-    if port.name != target.port.name {
-        ui.step("port", format!("{} (reconnected)", port.name));
+    if port.name != job.target.port.name {
+        ui.field("port", format!("{} (reconnected)", port.name), Tone::Normal);
     }
-    ui.step(
+    ui.field(
         "ready",
         format!("MicroPython {} is running", running.version),
+        Tone::Good,
     );
-    Ok(match change {
-        Change::Install => "installed",
-        Change::WrongBuild => "build fixed",
-        Change::Update => "updated",
-        _ => "flashed again",
+    Ok(match job.change() {
+        Change::Install => Outcome::Installed,
+        Change::WrongBuild => Outcome::BuildFixed,
+        Change::Update => Outcome::Updated,
+        _ => Outcome::Reflashed,
     })
 }
 
+/// Shows a board's result and adds it to the run report.
+fn record(
+    ui: &Ui,
+    report: &mut Vec<(String, Option<Outcome>)>,
+    port: &str,
+    result: Result<Outcome>,
+    show: bool,
+) {
+    match result {
+        Ok(outcome) => {
+            if show {
+                ui.field("result", outcome.label(), outcome.tone());
+            }
+            report.push((port.to_owned(), Some(outcome)));
+        }
+        Err(error) => {
+            ui.error(&format!("{port}: {error:#}"));
+            report.push((port.to_owned(), None));
+        }
+    }
+}
+
 fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
-    let (ports, mut unknown) = select_ports(args)?;
     if matches!(args.command, Some(Command::Probe)) {
+        let (ports, _) = select_ports(args)?;
         ensure!(!ports.is_empty(), "No supported USB serial port was found");
         let (targets, failed) = read_targets(&ports, None, !args.port.is_empty());
         println!("{}", serde_json::to_string_pretty(&targets)?);
-        ensure!(failed == 0, "Could not read {failed} port(s)");
+        ensure!(failed.is_empty(), "Could not read {} port(s)", failed.len());
         ensure!(!targets.is_empty(), "No ESP32 chip was detected");
         return Ok(());
     }
     if let Some(Command::Backup { output }) = &args.command {
+        let (ports, _) = select_ports(args)?;
         ensure!(
             args.port.len() == 1 && ports.len() == 1,
             "For a backup, select exactly one port with --port"
         );
         let target = inspect(&ports[0])?;
-        ui.step(
+        ui.field(
             "backup",
             format!("{} → {}", target.port.name, output.display()),
+            Tone::Active,
         );
         Connected::open(&target.port, Some(921_600))?.backup(&target.hardware, output)?;
-        ui.step("backup", "complete");
+        ui.field("backup", "complete", Tone::Good);
         return Ok(());
     }
+    let preview = matches!(args.command, Some(Command::Plan));
     ensure!(
-        ui.interactive || args.yes || matches!(args.command, Some(Command::Plan)),
+        ui.interactive || args.yes || preview,
         "Use a terminal, or specify --yes. Use probe or plan to inspect boards without writing firmware."
     );
-    if ports.is_empty() && unknown.is_empty() {
-        let firmware_usb = device::ports()?.iter().any(|port| port.firmware_usb);
-        if firmware_usb {
-            bail!(
-                "The board exposes only its firmware USB port. Hold BOOT, tap RESET, release BOOT and run again."
-            );
-        }
+    let (ports, unknown) = select_ports(args)?;
+    let (ports, mut unknown) = if !ports.is_empty() || !unknown.is_empty() {
+        (ports, unknown)
+    } else if ui.interactive && !args.yes {
+        wait_board(ui)?
+    } else if device::ports()?.iter().any(|port| port.firmware_usb) {
+        bail!(
+            "The board exposes only its firmware USB port. Hold BOOT, tap RESET, release BOOT and run again."
+        );
+    } else {
         bail!("No ESP32 adapter was found. Connect a board and run again.");
-    }
+    };
     let catalog = Catalog::new(root, args.offline)?;
     let options = match &args.command {
         Some(Command::Flash {
@@ -562,52 +854,69 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
         _ => FlashOptions::default(),
     };
     let mut catalogs = HashMap::new();
-    ui.step("scan", "reading USB serial ports");
-    let (targets, mut failures) = read_targets(&ports, Some(ui), !args.port.is_empty());
+    ui.live("scan", "reading USB serial ports");
+    let (targets, failed) = read_targets(&ports, Some(ui), !args.port.is_empty());
+    let detected = !targets.is_empty();
     let mut seen: HashSet<String> = targets
         .iter()
         .filter_map(|target| target.hardware.mac.clone())
         .collect();
-    let mut process = |target: &Target| -> Result<&'static str> {
-        show_target(target, ui);
-        let board = &target.hardware.board;
-        if !catalogs.contains_key(board) {
-            ui.step("catalog", "asking micropython.org");
-            let result = catalog.builds(board)?;
-            if !result.1 {
-                ui.warning("Offline: using cached firmware; newer releases cannot be checked");
+    let mut report: Vec<(String, Option<Outcome>)> =
+        failed.into_iter().map(|port| (port, None)).collect();
+    let mut jobs = Vec::new();
+    for target in targets {
+        let port = target.port.name.clone();
+        let job = prepare(target, &mut catalogs, &catalog, args, options, ui);
+        match job {
+            Ok(Some(job)) if preview => {
+                let outcome = if job.change().needed() {
+                    Outcome::WouldFlash
+                } else {
+                    Outcome::WouldSkip
+                };
+                record(ui, &mut report, &port, Ok(outcome), true);
             }
-            catalogs.insert(board.clone(), result);
+            Ok(Some(job)) => jobs.push(job),
+            Ok(None) => record(ui, &mut report, &port, Ok(Outcome::Skipped), true),
+            Err(error) => record(ui, &mut report, &port, Err(error), true),
         }
-        let (builds, online) = &catalogs[board];
-        update(target, builds, *online, &catalog, args, options, ui)
+    }
+    let actions = match jobs.len() {
+        0 => Vec::new(),
+        1 => vec![decide(
+            &mut jobs[0],
+            &catalog,
+            args,
+            options,
+            ui,
+            "Choose an action",
+            true,
+        )?],
+        _ => decide_all(&mut jobs, &catalog, args, options, ui)?,
     };
-    let mut outcomes = Vec::new();
-    for target in &targets {
-        match process(target) {
-            Ok(outcome) => {
-                outcomes.push(outcome);
-                ui.result(outcome);
-            }
-            Err(error) => {
-                failures += 1;
-                ui.error(&format!("{}: {error:#}", target.port.name));
+    let several = jobs.len() > 1;
+    for (job, action) in jobs.iter().zip(actions) {
+        match action {
+            Action::Skip => record(ui, &mut report, job.port(), Ok(Outcome::Skipped), !several),
+            Action::Flash { erase } => {
+                if several {
+                    ui.section(job.port());
+                }
+                let result = execute(job, erase, &catalog, args, ui);
+                record(ui, &mut report, job.port(), result, true);
             }
         }
     }
-    while !unknown.is_empty()
-        && ui.interactive
-        && !args.yes
-        && !matches!(args.command, Some(Command::Plan))
-    {
-        let mut items = vec![Item::new('c', "close", "")];
+    while !unknown.is_empty() && ui.interactive && !args.yes && !preview {
+        let mut items = vec![Item::new('c', "Close", "")];
         items.extend(unknown.iter().enumerate().map(|(i, port)| {
             Item::new(
                 char::from_digit((i + 1) as u32, 10).unwrap_or('\0'),
                 &port.name,
-                format!("unknown adapter {:04x}:{:04x}", port.vid, port.pid),
+                "not a known ESP32 USB adapter",
             )
         }));
+        println!();
         let choice = ui
             .choose("Try a port that was not probed?", &items, 0, Some(0))?
             .unwrap_or(0);
@@ -615,43 +924,57 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
             break;
         }
         let port = unknown.remove(choice - 1);
+        log::info!("Trying USB adapter {:04x}:{:04x}", port.vid, port.pid);
         match inspect(&port) {
             Ok(target) => {
                 if let Some(mac) = &target.hardware.mac
                     && !seen.insert(mac.clone())
                 {
-                    ui.step("skip", "this board was already processed");
+                    ui.field("skip", "this board was already processed", Tone::Muted);
                     continue;
                 }
-                match process(&target) {
-                    Ok(outcome) => {
-                        outcomes.push(outcome);
-                        ui.result(outcome);
+                let result = (|| {
+                    let Some(mut job) =
+                        prepare(target, &mut catalogs, &catalog, args, options, ui)?
+                    else {
+                        return Ok(Outcome::Skipped);
+                    };
+                    match decide(
+                        &mut job,
+                        &catalog,
+                        args,
+                        options,
+                        ui,
+                        "Choose an action",
+                        true,
+                    )? {
+                        Action::Skip => Ok(Outcome::Skipped),
+                        Action::Flash { erase } => execute(&job, erase, &catalog, args, ui),
                     }
-                    Err(error) => {
-                        failures += 1;
-                        ui.error(&format!("{}: {error:#}", port.name));
-                    }
-                }
+                })();
+                record(ui, &mut report, &port.name, result, true);
             }
             Err(error) => ui.warning(&format!("{}: {error:#}", port.name)),
         }
     }
-    let skipped = outcomes
+    if report.len() > 1 {
+        let rows: Vec<_> = report
+            .iter()
+            .map(|(port, outcome)| match outcome {
+                Some(outcome) => (port.clone(), outcome.label(), outcome.tone()),
+                None => (port.clone(), "failed", Tone::Bad),
+            })
+            .collect();
+        ui.summary(&rows, preview);
+    }
+    let failures = report
         .iter()
-        .filter(|outcome| matches!(**outcome, "skipped" | "would skip"))
+        .filter(|(_, outcome)| outcome.is_none())
         .count();
-    ui.summary(
-        outcomes.len() - skipped,
-        skipped,
-        failures,
-        matches!(args.command, Some(Command::Plan)),
-    );
-    ensure!(
-        failures == 0,
-        "{failures} board operation(s) failed; see the log"
-    );
-    if targets.is_empty() && !ui.interactive {
+    if failures > 0 {
+        return Err(Shown(failures).into());
+    }
+    if !detected && !ui.interactive {
         bail!("No ESP32 chip was detected on the selected ports");
     }
     Ok(())
@@ -696,7 +1019,9 @@ fn main() {
                         .context("Tool update cannot preserve a non-UTF-8 argument")
                 })
                 .collect::<Result<_>>()?;
-            self_update::update(restart_args, ui.interactive, |text| ui.step("tool", text))
+            self_update::update(restart_args, ui.interactive, |text| {
+                ui.field("tool", text, Tone::Active)
+            })
         })();
         match result {
             Ok(true) => {
@@ -709,22 +1034,25 @@ fn main() {
             )),
         }
     }
-    let result = run(&args, &root, &ui);
+    let mut result = run(&args, &root, &ui);
+    let closed = result.as_ref().is_err_and(|error| error.is::<Closed>());
+    if closed {
+        result = Ok(());
+    }
     if let Err(error) = &result {
-        if matches!(args.command, Some(Command::Probe)) {
+        if let Some(Shown(failures)) = error.downcast_ref::<Shown>() {
+            log::error!("{failures} board operation(s) failed");
+        } else if matches!(args.command, Some(Command::Probe)) {
             eprintln!("{error:#}");
         } else {
             ui.error(&format!("{error:#}"));
         }
     }
-    if !matches!(args.command, Some(Command::Probe)) {
+    if !matches!(args.command, Some(Command::Probe)) && !closed {
         if let Some(path) = log_path {
-            ui.line(
-                &format!("log: {}", path.display()),
-                crossterm::style::Color::DarkGrey,
-            );
+            ui.line(&format!("log: {}", path.display()), Tone::Muted);
         }
-        if !args.no_pause {
+        if !args.no_pause && ui::owns_window() {
             let _ = ui.pause();
         }
     }
@@ -860,18 +1188,20 @@ snapshot('/')
                 "--force",
             ])?;
             let ui = Ui { interactive: false };
-            update(
-                &target,
-                &builds,
-                false,
-                &catalog,
-                &args,
-                FlashOptions {
-                    force: true,
-                    ..Default::default()
-                },
-                &ui,
-            )?;
+            let job = Job {
+                target: target.clone(),
+                builds: builds.clone(),
+                online: false,
+                variant: variant.clone(),
+            };
+            let options = FlashOptions {
+                force: true,
+                ..Default::default()
+            };
+            let Action::Flash { erase } = job.default_action(options) else {
+                bail!("A forced flash must write firmware");
+            };
+            execute(&job, erase, &catalog, &args, &ui)?;
             let after = session(&port)?.execute(MANIFEST)?;
             ensure!(
                 before == after,

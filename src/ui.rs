@@ -12,8 +12,32 @@ use crossterm::{
 use espflash::target::ProgressCallbacks;
 use std::{
     io::{self, IsTerminal},
+    ops::ControlFlow,
     time::{Duration, Instant},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    Active,
+    Good,
+    Muted,
+    Warn,
+    Bad,
+}
+
+impl Tone {
+    fn color(self) -> Color {
+        match self {
+            Self::Normal => Color::White,
+            Self::Active => Color::Cyan,
+            Self::Good => Color::Green,
+            Self::Muted => Color::Grey,
+            Self::Warn => Color::Yellow,
+            Self::Bad => Color::Red,
+        }
+    }
+}
 
 pub struct Ui {
     pub interactive: bool,
@@ -77,15 +101,34 @@ fn interrupted(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press && key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C' | 'с' | 'С')))
 }
 
+/// Reads a hotkey typed in the Russian layout as the Latin key in the same place.
 fn hotkey(c: char) -> char {
-    match c.to_ascii_lowercase() {
-        'а' | 'А' => 'f',
-        'у' | 'У' => 'e',
-        'м' | 'М' => 'v',
-        'ы' | 'Ы' => 's',
-        'с' | 'С' => 'c',
-        other => other,
-    }
+    const RUSSIAN: &str = "йцукенгшщзхъфывапролджэячсмитьбю";
+    const LATIN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.";
+    let c = c.to_lowercase().next().unwrap_or(c);
+    RUSSIAN
+        .chars()
+        .position(|r| r == c)
+        .and_then(|i| LATIN.chars().nth(i))
+        .unwrap_or(c)
+}
+
+/// True when closing this program also closes its console window,
+/// as after a double click in Explorer.
+#[cfg(windows)]
+pub fn owns_window() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    let mut processes = [0u32; 2];
+    unsafe { GetConsoleProcessList(processes.as_mut_ptr(), 2) == 1 }
+}
+
+#[cfg(not(windows))]
+pub fn owns_window() -> bool {
+    true
+}
+
+pub fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
 }
 
 impl Ui {
@@ -97,25 +140,28 @@ impl Ui {
     pub fn title(&self) {
         self.line(
             &format!("micropython-esp-flasher {}", env!("CARGO_PKG_VERSION")),
-            Color::Cyan,
+            Tone::Active,
         );
         self.rule();
     }
     fn rule(&self) {
         let width = terminal::size().map_or(68, |(cols, _)| usize::from(cols).saturating_sub(4));
-        self.line(&"─".repeat(width.min(68)), Color::DarkGrey);
+        self.line(&"─".repeat(width.min(68)), Tone::Muted);
     }
     pub fn section(&self, title: &str) {
+        self.clear_live();
         println!();
-        self.line(title, Color::Cyan);
+        self.line(title, Tone::Active);
         self.rule();
     }
-    pub fn line(&self, text: &str, color: Color) {
+    pub fn line(&self, text: &str, tone: Tone) {
         log::info!("{text}");
         if self.interactive {
             let _ = execute!(
                 io::stdout(),
-                SetForegroundColor(color),
+                MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                SetForegroundColor(tone.color()),
                 Print(format!("  {text}\n")),
                 ResetColor
             );
@@ -123,23 +169,17 @@ impl Ui {
             println!("  {text}");
         }
     }
-    pub fn step(&self, label: &str, value: impl AsRef<str>) {
-        let color = match label {
-            "ready" | "verified" => Color::Green,
-            "skip" => Color::Grey,
-            "scan" | "connect" | "writing" | "verify" | "tool" => Color::Cyan,
-            _ => Color::White,
-        };
-        self.field(label, value.as_ref(), color);
-    }
-    fn field(&self, label: &str, value: &str, color: Color) {
+    pub fn field(&self, label: &str, value: impl AsRef<str>, tone: Tone) {
+        let value = value.as_ref();
         log::info!("{label:<12} {value}");
         if self.interactive {
             let _ = execute!(
                 io::stdout(),
+                MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
                 SetForegroundColor(Color::Grey),
                 Print(format!("  {label:<12} ")),
-                SetForegroundColor(color),
+                SetForegroundColor(tone.color()),
                 Print(format!("{value}\n")),
                 ResetColor
             );
@@ -147,66 +187,53 @@ impl Ui {
             println!("  {label:<12} {value}");
         }
     }
-    pub fn result(&self, outcome: &str) {
-        let color = match outcome {
-            "skipped" | "would skip" => Color::Grey,
-            "would flash" => Color::Cyan,
-            _ => Color::Green,
-        };
-        self.field("result", outcome, color);
+    /// Shows a step in progress; the next output replaces it.
+    pub fn live(&self, label: &str, value: &str) {
+        log::info!("{label:<12} {value}");
+        if self.interactive {
+            let _ = execute!(
+                io::stdout(),
+                MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                SetForegroundColor(Color::Grey),
+                Print(format!("  {label:<12} ")),
+                SetForegroundColor(Color::Cyan),
+                Print(format!("{value}…")),
+                ResetColor
+            );
+        }
     }
-    pub fn summary(&self, written: usize, skipped: usize, failed: usize, preview: bool) {
-        self.section(if preview {
-            "Plan summary"
-        } else {
-            "Run summary"
-        });
-        self.field(
-            if preview { "Would write" } else { "Written" },
-            &written.to_string(),
-            if preview { Color::Cyan } else { Color::Green },
-        );
-        self.field(
-            if preview { "Would skip" } else { "Skipped" },
-            &skipped.to_string(),
-            Color::Grey,
-        );
-        self.field(
-            "Failed",
-            &failed.to_string(),
-            if failed > 0 { Color::Red } else { Color::Grey },
-        );
+    pub fn summary(&self, rows: &[(String, &str, Tone)], preview: bool) {
+        self.section(if preview { "Plan summary" } else { "Summary" });
+        for (port, outcome, tone) in rows {
+            self.field(port, outcome, *tone);
+        }
     }
     pub fn warning(&self, text: &str) {
-        self.line(text, Color::Yellow);
+        self.line(text, Tone::Warn);
     }
     pub fn error(&self, text: &str) {
-        self.line(text, Color::Red);
+        self.line(text, Tone::Bad);
     }
-    pub fn card(&self, title: &str, fields: &[(&str, &str, Color)]) {
-        self.section(title);
-        for (label, value, color) in fields {
-            self.field(label, value, *color);
-        }
-        println!();
-    }
-    pub fn countdown(&self, action: &str) -> Result<bool> {
+    /// Counts down to `action`. Returns true when a key or click asks for the menu.
+    pub fn countdown(&self, action: &str, seconds: u64) -> Result<bool> {
         ensure!(
             self.interactive,
             "Use a terminal, or specify --yes to run without a menu"
         );
+        println!();
         let _input = Input::start()?;
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
-            let left = 5 - start.elapsed().as_secs();
+        while start.elapsed() < Duration::from_secs(seconds) {
+            let left = seconds - start.elapsed().as_secs();
             execute!(
                 io::stdout(),
                 MoveToColumn(0),
                 Clear(ClearType::CurrentLine),
                 SetForegroundColor(Color::Cyan),
-                Print(format!(
-                    "  ► {action} in {left} s   press a key or click for options"
-                )),
+                Print(format!("  ► {action} in {left} s")),
+                SetForegroundColor(Color::DarkGrey),
+                Print(" · any key or click for options"),
                 ResetColor
             )?;
             if event::poll(Duration::from_millis(50))? {
@@ -230,8 +257,56 @@ impl Ui {
         log::info!("Countdown completed: {action}");
         Ok(false)
     }
+    /// Polls until `check` breaks with a value. Continue carries the message to show meanwhile.
+    /// Returns None when the user presses Esc.
+    pub fn wait<T>(
+        &self,
+        mut check: impl FnMut() -> Result<ControlFlow<T, String>>,
+    ) -> Result<Option<T>> {
+        ensure!(self.interactive, "Waiting for a board needs a terminal");
+        let _input = Input::start()?;
+        let mut shown = String::new();
+        loop {
+            match check()? {
+                ControlFlow::Break(value) => {
+                    self.clear_live();
+                    return Ok(Some(value));
+                }
+                ControlFlow::Continue(message) => {
+                    if message != shown {
+                        log::info!("Waiting: {message}");
+                        shown = message;
+                    }
+                    execute!(
+                        io::stdout(),
+                        MoveToColumn(0),
+                        Clear(ClearType::CurrentLine),
+                        SetForegroundColor(Color::Cyan),
+                        Print(format!("  … {shown}")),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(" · esc to close"),
+                        ResetColor
+                    )?;
+                }
+            }
+            if event::poll(Duration::from_millis(300))? {
+                let input = event::read()?;
+                if interrupted(&input) {
+                    bail!("Cancelled");
+                }
+                if matches!(input, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc)
+                {
+                    self.clear_live();
+                    log::info!("Waiting closed by the user");
+                    return Ok(None);
+                }
+            }
+        }
+    }
     fn clear_live(&self) {
-        let _ = execute!(io::stdout(), MoveToColumn(0), Clear(ClearType::CurrentLine));
+        if self.interactive {
+            let _ = execute!(io::stdout(), MoveToColumn(0), Clear(ClearType::CurrentLine));
+        }
     }
 
     pub fn choose(
@@ -246,7 +321,7 @@ impl Ui {
             self.interactive,
             "This choice needs a terminal; specify a port, variant or erase action explicitly"
         );
-        self.line(title, Color::Cyan);
+        self.line(title, Tone::Active);
         let label_width = items
             .iter()
             .map(|item| item.label.chars().count())
@@ -362,7 +437,7 @@ impl Ui {
 
     pub fn pause(&self) -> Result<()> {
         if self.interactive {
-            self.line("Press a key to close", Color::DarkGrey);
+            self.line("Press a key to close", Tone::Muted);
             let _input = Input::start()?;
             loop {
                 if let Event::Key(key) = event::read()?
@@ -396,8 +471,7 @@ impl ProgressCallbacks for Progress<'_> {
     fn init(&mut self, addr: u32, total: usize) {
         self.total = total;
         self.start = Instant::now();
-        self.ui
-            .step("writing", format!("0x{addr:x}, {total} blocks"));
+        log::info!("Writing at 0x{addr:x}, {total} blocks");
     }
     fn update(&mut self, current: usize) {
         let percent = current.saturating_mul(100) / self.total.max(1);
@@ -411,9 +485,11 @@ impl ProgressCallbacks for Progress<'_> {
                 io::stdout(),
                 MoveToColumn(0),
                 Clear(ClearType::CurrentLine),
+                SetForegroundColor(Color::Grey),
+                Print(format!("  {:<12} ", "writing")),
                 SetForegroundColor(Color::Cyan),
                 Print(format!(
-                    "  ► writing   {}{}  {percent:3}%  {:.1}s",
+                    "{}{}  {percent:3}%  {:.1}s",
                     "█".repeat(filled),
                     "░".repeat(25 - filled),
                     self.start.elapsed().as_secs_f32()
@@ -421,26 +497,22 @@ impl ProgressCallbacks for Progress<'_> {
                 ResetColor
             );
         } else if percent.is_multiple_of(10) {
-            self.ui.step("writing", format!("{percent}%"));
+            self.ui
+                .field("writing", format!("{percent}%"), Tone::Active);
         }
     }
     fn verifying(&mut self) {
-        if self.ui.interactive {
-            self.ui.clear_live();
-        }
-        self.ui.step("verify", "checking flash checksum");
+        self.ui.live("verify", "checking flash checksum");
     }
     fn finish(&mut self, skipped: bool) {
-        if self.ui.interactive {
-            self.ui.clear_live();
-        }
-        self.ui.step(
+        self.ui.field(
             "verified",
             if skipped {
                 "already written".to_owned()
             } else {
-                format!("completed in {:.1}s", self.start.elapsed().as_secs_f32())
+                format!("written in {:.1}s", self.start.elapsed().as_secs_f32())
             },
+            Tone::Good,
         );
     }
 }
@@ -467,8 +539,22 @@ mod tests {
             KeyCode::Char('f'),
             KeyModifiers::NONE
         )));
-        assert_eq!(hotkey('а'), 'f');
-        assert_eq!(hotkey('У'), 'e');
-        assert_eq!(hotkey('М'), 'v');
+    }
+
+    #[test]
+    fn russian_layout_keys_map_to_latin_hotkeys() {
+        for (russian, latin) in [
+            ('а', 'f'),
+            ('У', 'e'),
+            ('м', 'v'),
+            ('ы', 's'),
+            ('с', 'c'),
+            ('ф', 'a'),
+            ('И', 'b'),
+        ] {
+            assert_eq!(hotkey(russian), latin);
+        }
+        assert_eq!(hotkey('F'), 'f');
+        assert_eq!(hotkey('1'), '1');
     }
 }

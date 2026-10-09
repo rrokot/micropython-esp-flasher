@@ -17,5 +17,5 @@ Install and update MicroPython on ESP32 boards.
 [Releases](https://github.com/rrokot/micropython-esp-flasher/releases/latest): Windows x64, Linux x64/ARM64, macOS Intel/Apple Silicon.
 Linux requires glibc ≥ 2.35, `libudev.so.1`, and serial port permissions.
 
-The default action is automatic update. During the 5-second countdown, a key or click opens the action menu.
+The default action is automatic update. During the countdown, a key or click opens the action menu.
 `Erase and install` deletes all files on the board.
