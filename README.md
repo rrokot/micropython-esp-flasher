@@ -1,40 +1,21 @@
 # <img src="assets/mpflash.svg" width="32" height="32" alt=""> micropython-esp-flasher
 
-Install or update MicroPython on ESP32 boards from Windows, Linux, or macOS.
+Install and update MicroPython on ESP32 boards.
 
 ![MicroPython update countdown](docs/screen.svg)
 
 ## Features
 
-The tool can:
-
-- Update itself from GitHub Releases before it connects to boards.
-- Find USB serial ports and update several ESP32 boards in one run.
-- Select firmware from chip type, flash size, and PSRAM.
-- Skip boards that need no update, including boards with a newer MicroPython version.
-- Replace a recognised wrong build with the correct build of the same version.
-- Ask for confirmation if it detects that a firmware change would lose files.
-- Use downloaded firmware without an internet connection.
+- Detect USB serial ports and update multiple boards.
+- Select firmware by chip, flash size, and PSRAM.
+- Skip current or newer firmware; correct known build mismatches.
+- Check filesystem compatibility and require confirmation before data loss.
+- Cache firmware for offline use and update the tool from GitHub Releases.
 
 ## Usage
 
-Download the build for your system from the [latest release](https://github.com/rrokot/micropython-esp-flasher/releases/latest).
-On Windows, run `micropython-esp-flasher.exe`.
-On Linux or macOS, run `./micropython-esp-flasher` from a terminal.
+[Releases](https://github.com/rrokot/micropython-esp-flasher/releases/latest): Windows x64, Linux x64/ARM64, macOS Intel/Apple Silicon.
+Linux requires glibc ≥ 2.35, `libudev.so.1`, and serial port permissions.
 
-Builds are available for Windows x64, Linux x64 and ARM64, and macOS Intel and Apple Silicon.
-Linux needs glibc 2.35 or later, `libudev.so.1`, and access to the serial port.
-On Ubuntu or Debian, add your account to the `dialout` group, then log out and log in again.
-
-The tool waits 5 seconds before it writes firmware or skips a board.
-Press a key or click during this time to open the menu.
-Select `Install`, `Erase and install`, `Choose build`, or `Skip`.
+The default action is automatic update. During the 5-second countdown, a key or click opens the action menu.
 `Erase and install` deletes all files on the board.
-
-## Offline
-
-The tool stores firmware in the `firmware` folder.
-For offline use:
-
-1. With the computer online, install each required firmware build on a board.
-2. Copy the complete tool folder to the offline computer.
