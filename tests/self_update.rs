@@ -7,7 +7,14 @@ use std::{
 };
 
 fn hash(path: &std::path::Path) -> String {
-    format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
+    use std::fmt::Write;
+    Sha256::digest(fs::read(path).unwrap()).iter().fold(
+        String::with_capacity(64),
+        |mut text, byte| {
+            write!(text, "{byte:02x}").unwrap();
+            text
+        },
+    )
 }
 
 #[test]

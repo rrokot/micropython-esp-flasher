@@ -166,6 +166,19 @@ fn fetch_release(client: &Client, url: &str) -> Result<Release> {
     Ok(serde_json::from_slice(&bounded_read(response, MAX_JSON)?)?)
 }
 
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                HEX[(byte >> 4) as usize] as char,
+                HEX[(byte & 15) as usize] as char,
+            ]
+        })
+        .collect()
+}
+
 fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
@@ -177,7 +190,7 @@ fn hash_file(path: &Path) -> Result<String> {
         }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex_digest(&hash.finalize()))
 }
 
 fn download(client: &Client, asset: &Asset, destination: &Path) -> Result<()> {
@@ -884,7 +897,7 @@ mod tests {
                 digest: Some(format!(
                     "sha256:{}",
                     if digest_ok {
-                        format!("{:x}", Sha256::digest(b"abc"))
+                        hex_digest(&Sha256::digest(b"abc"))
                     } else {
                         "0".repeat(64)
                     }
