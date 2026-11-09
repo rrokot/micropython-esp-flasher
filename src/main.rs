@@ -1073,6 +1073,28 @@ fn run(args: &Args, root: &Path, ui: &Ui) -> Result<()> {
     Ok(())
 }
 
+/// Reports the tool update that restarted this program.
+fn show_restart(ui: &Ui, restarted: &self_update::Restarted) {
+    match &restarted.error {
+        None => ui.field(
+            "tool",
+            format!("updated from {}", restarted.from),
+            Tone::Good,
+        ),
+        Some(error) => ui.field(
+            "tool",
+            format!(
+                "update to {} failed, {} restored: {error}",
+                restarted.to, restarted.from
+            ),
+            Tone::Bad,
+        ),
+    }
+    if let Some(error) = &restarted.cleanup {
+        ui.warning(&format!("Update files could not be removed: {error}"));
+    }
+}
+
 fn main() {
     let raw: Vec<_> = std::env::args_os().collect();
     if let Some(result) = self_update::helper(&raw) {
@@ -1082,7 +1104,7 @@ fn main() {
         }
         return;
     }
-    let (raw, updated) = match self_update::startup_args(raw) {
+    let (raw, restarted) = match self_update::startup_args(raw) {
         Ok(raw) => raw,
         Err(error) => {
             eprintln!("Tool update restart failed: {error:#}");
@@ -1099,9 +1121,15 @@ fn main() {
     });
     let log_path = logging::start(&root);
     if !matches!(args.command, Some(Command::Probe)) {
+        if restarted.is_some() {
+            ui.clear_window();
+        }
         ui.title();
     }
-    if ui.interactive && args.command.is_none() && !args.offline && !updated {
+    if let Some(restarted) = &restarted {
+        show_restart(&ui, restarted);
+    }
+    if ui.interactive && args.command.is_none() && !args.offline && restarted.is_none() {
         let result = (|| {
             let restart_args = raw
                 .iter()

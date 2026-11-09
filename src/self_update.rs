@@ -22,6 +22,7 @@ const APPLY: &str = "--internal-apply-update";
 const FINISH: &str = "--internal-finish-update";
 const NOTICE: &str = "THIRD-PARTY-LICENSES.html";
 const REQUEST: &str = "request.json";
+const RESTORED: &str = "Tool update failed; previous files were restored";
 const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 128 * 1024 * 1024;
 const MAX_JSON: u64 = 1024 * 1024;
@@ -469,11 +470,13 @@ fn lock_target(target: &Path) -> Result<File> {
 fn atomic_copy(source: &Path, destination: &Path, scratch: &Path) -> Result<()> {
     regular_or_missing(source)?;
     regular_or_missing(destination)?;
-    let mut file = File::create_new(scratch)?;
-    io::copy(&mut File::open(source)?, &mut file)?;
-    file.sync_all()?;
-    file.set_permissions(fs::metadata(source)?.permissions())?;
-    drop(file);
+    let copied = (|| -> io::Result<()> {
+        let mut file = File::create_new(scratch)?;
+        io::copy(&mut File::open(source)?, &mut file)?;
+        file.sync_all()?;
+        file.set_permissions(fs::metadata(source)?.permissions())
+    })();
+    copied.with_context(|| format!("Cannot copy {} to {}", source.display(), scratch.display()))?;
     let start = Instant::now();
     loop {
         match fs::rename(scratch, destination) {
@@ -555,7 +558,7 @@ fn replace_files(
                 );
             }
         }
-        return Err(error.context("Tool update failed; previous files were restored"));
+        return Err(error.context(RESTORED));
     }
     Ok(())
 }
@@ -792,15 +795,36 @@ fn cleanup(stage: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn startup_args(mut args: Vec<OsString>) -> Result<(Vec<OsString>, bool)> {
+/// The tool update that restarted this program, to report once the console shows the program.
+#[derive(Debug)]
+pub struct Restarted {
+    /// The version that ran before the update.
+    pub from: String,
+    /// The version the update installed or tried to install.
+    pub to: String,
+    /// Why the update failed; the previous version runs again.
+    pub error: Option<String>,
+    /// Why the update files could not be removed.
+    pub cleanup: Option<String>,
+}
+
+pub fn startup_args(args: Vec<OsString>) -> Result<(Vec<OsString>, Option<Restarted>)> {
     if args.get(1).is_none_or(|arg| arg != FINISH) {
-        return Ok((args, false));
+        return Ok((args, None));
     }
+    finish_restart(args, &std::env::current_exe()?)
+}
+
+/// Checks and removes the update after a restart into `program`, and drops the restart arguments.
+fn finish_restart(
+    mut args: Vec<OsString>,
+    program: &Path,
+) -> Result<(Vec<OsString>, Option<Restarted>)> {
     ensure!(args.len() >= 4, "Invalid tool update restart arguments");
     let stage = Path::new(&args[2]);
     let request = read_request(stage)?;
     ensure!(
-        fs::canonicalize(std::env::current_exe()?)? == fs::canonicalize(&request.target)?,
+        fs::canonicalize(program)? == fs::canonicalize(&request.target)?,
         "The restarted program does not match the update target"
     );
     let digest = hash_file(&request.target)?;
@@ -815,18 +839,23 @@ pub fn startup_args(mut args: Vec<OsString>) -> Result<(Vec<OsString>, bool)> {
     if pid != 0 {
         wait_parent(pid)?;
     }
-    if let Some(error) = request.error {
-        eprintln!("Tool update failed. The previous version was restored: {error}");
-    }
-    if let Err(error) = cleanup(stage) {
-        eprintln!("Tool update finished; temporary files could not be removed: {error:#}");
-    }
+    let restarted = Restarted {
+        from: request.previous_version,
+        to: request.version,
+        // The report already says that the previous version was restored.
+        error: request.error.map(|error| {
+            error
+                .strip_prefix(&format!("{RESTORED}: "))
+                .map_or(error.clone(), str::to_owned)
+        }),
+        cleanup: cleanup(stage).err().map(|error| format!("{error:#}")),
+    };
     args.drain(1..4);
     // Releases through 0.5.2 insert this argument when they restart after an update.
     if args.get(1).is_some_and(|arg| arg == "--no-self-update") {
         args.remove(1);
     }
-    Ok((args, true))
+    Ok((args, Some(restarted)))
 }
 
 #[cfg(test)]
@@ -1120,6 +1149,52 @@ mod tests {
                 b"keep-personal"
             );
         }
+    }
+
+    #[test]
+    fn restart_reports_the_update_removes_its_files_and_drops_restart_arguments() {
+        for (error, unknown_file) in [
+            (None, false),
+            (
+                Some("New program failed its launch check".to_owned()),
+                false,
+            ),
+            (None, true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (stage, mut request) = prepared(root.path());
+            request.error = error.as_ref().map(|error| format!("{RESTORED}: {error}"));
+            save_request(stage.path(), &request).unwrap();
+            if unknown_file {
+                fs::write(stage.path().join("personal-file"), b"keep").unwrap();
+            }
+            let stage = stage.keep();
+            let args = [
+                "tool",
+                FINISH,
+                stage.to_str().unwrap(),
+                "0",
+                "--no-self-update",
+                "--port",
+                "COM3",
+            ]
+            .map(OsString::from)
+            .to_vec();
+            let (args, restarted) = finish_restart(args, &request.target).unwrap();
+            assert_eq!(args, ["tool", "--port", "COM3"].map(OsString::from));
+            let restarted = restarted.unwrap();
+            assert_eq!(
+                (restarted.from.as_str(), restarted.to.as_str()),
+                ("0.5.0", "0.6.0")
+            );
+            assert_eq!(restarted.error, error);
+            assert_eq!(restarted.cleanup.is_some(), unknown_file);
+            assert_eq!(stage.exists(), unknown_file);
+        }
+        let plain = vec![OsString::from("tool"), OsString::from("plan")];
+        let (args, restarted) = startup_args(plain.clone()).unwrap();
+        assert_eq!(args, plain);
+        assert!(restarted.is_none());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::{Result, bail, ensure};
 use crossterm::{
-    cursor::{self, Hide, MoveToColumn, MoveUp, Show},
+    cursor::{self, Hide, MoveTo, MoveToColumn, MoveUp, Show},
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
         MouseButton, MouseEventKind,
@@ -135,6 +135,18 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             interactive: io::stdout().is_terminal() && io::stdin().is_terminal(),
+        }
+    }
+    /// Clears what the previous version wrote before an update restart, so the window starts
+    /// with this version. A terminal shared with a shell keeps its contents.
+    pub fn clear_window(&self) {
+        if self.interactive && owns_window() {
+            let _ = execute!(
+                io::stdout(),
+                Clear(ClearType::All),
+                Clear(ClearType::Purge),
+                MoveTo(0, 0)
+            );
         }
     }
     pub fn title(&self) {
