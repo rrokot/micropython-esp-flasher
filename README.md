@@ -7,7 +7,9 @@ Install and update MicroPython on ESP32 boards.
 ## Features
 
 - Detect USB serial ports and update multiple boards.
-- Select firmware by chip, flash size, and PSRAM.
+- Select firmware by chip, flash size, and PSRAM. When PSRAM cannot be detected (ESP32 WROVER),
+  a board without MicroPython gets the SPIRAM build first and keeps it only if PSRAM is found;
+  a board with MicroPython keeps the installed build variant.
 - Skip current or newer firmware; correct known build mismatches.
 - Check filesystem compatibility and require confirmation before data loss.
 - Cache firmware for offline use and update the tool from GitHub Releases.

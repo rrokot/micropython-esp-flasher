@@ -8,7 +8,7 @@ mod self_update;
 mod ui;
 
 use anyhow::{Context, Result, bail, ensure};
-use catalog::{Build, Builds, Catalog};
+use catalog::{Build, Builds, Catalog, Psram};
 use clap::{Parser, Subcommand};
 use device::{Connected, Hardware, PortInfo};
 use plan::Change;
@@ -90,6 +90,8 @@ struct Job {
     builds: Builds,
     online: bool,
     variant: String,
+    /// How the choice treats PSRAM that cannot be detected.
+    psram: Psram,
 }
 
 impl Job {
@@ -314,12 +316,11 @@ fn show_target(target: &Target, ui: &Ui) {
         log::info!("serial       {serial}");
     }
     let hardware = &target.hardware;
-    let psram = if hardware.psram_mb > 0 {
-        format!("{} MB PSRAM", hardware.psram_mb)
-    } else if hardware.psram {
-        "PSRAM".into()
-    } else {
-        "no PSRAM".into()
+    let psram = match hardware.psram {
+        Some(true) if hardware.psram_mb > 0 => format!("{} MB PSRAM", hardware.psram_mb),
+        Some(true) => "PSRAM".into(),
+        Some(false) => "no PSRAM".into(),
+        None => "PSRAM unknown".into(),
     };
     ui.field(
         "chip",
@@ -394,6 +395,22 @@ fn show_plan(job: &Job, catalog: &Catalog, ui: &Ui) {
             ),
             Tone::Warn,
         );
+    }
+    match job.psram {
+        Psram::Decided => (),
+        Psram::Trial(trial) => ui.field(
+            "psram",
+            format!(
+                "a flash writes {} first and keeps it only if PSRAM answers",
+                build_name(job.board(), trial)
+            ),
+            Tone::Muted,
+        ),
+        Psram::Installed => ui.field(
+            "psram",
+            "cannot be checked; the build follows the installed firmware",
+            Tone::Muted,
+        ),
     }
     let change = job.change();
     ui.field(
@@ -525,6 +542,7 @@ fn prepare(
         catalogs.insert(board.clone(), catalog.builds(&board)?);
     }
     let (builds, online) = catalogs[&board].clone();
+    let mut automatic = false;
     let variant = if let Some(variant) = options.variant {
         let variant = if variant.eq_ignore_ascii_case("base") {
             ""
@@ -538,7 +556,10 @@ fn prepare(
         variant.to_owned()
     } else {
         match catalog::select_variant(&builds, &target.hardware.names(), online) {
-            Ok(variant) => variant,
+            Ok(variant) => {
+                automatic = true;
+                variant
+            }
             Err(error) => {
                 ui.warning(&error.to_string());
                 if args.yes {
@@ -551,11 +572,22 @@ fn prepare(
             }
         }
     };
+    let psram = if automatic {
+        catalog::psram_choice(
+            &builds,
+            &variant,
+            target.hardware.psram,
+            target.running.is_some(),
+        )
+    } else {
+        Psram::Decided
+    };
     let job = Job {
         target,
         builds,
         online,
         variant,
+        psram,
     };
     show_plan(&job, catalog, ui);
     Ok(Some(job))
@@ -611,6 +643,7 @@ fn decide(
             'v' => {
                 if let Some(selected) = choose_variant(ui, &job.builds, &job.variant)? {
                     job.variant = selected;
+                    job.psram = Psram::Decided;
                     show_plan(job, catalog, ui);
                 }
             }
@@ -698,14 +731,21 @@ fn decide_all(
     }
 }
 
-/// Writes the selected firmware and checks that the board runs it.
-fn execute(job: &Job, erase: bool, catalog: &Catalog, args: &Args, ui: &Ui) -> Result<Outcome> {
-    let board = job.board();
-    let build = job.build();
+/// Writes one build and checks that the board runs it, then updates `target` to the new state.
+/// Returns false when the user keeps the board files and skips the write.
+fn install(
+    target: &mut Target,
+    build: &Build,
+    erase: bool,
+    catalog: &Catalog,
+    args: &Args,
+    ui: &Ui,
+) -> Result<bool> {
+    let board = target.hardware.board.clone();
     if !catalog.cache.join(&build.name).is_file() {
         ui.live("download", &build.name);
     }
-    let path = catalog.firmware(board, build)?;
+    let path = catalog.firmware(&board, build)?;
     ui.field(
         "file",
         format!(
@@ -718,11 +758,9 @@ fn execute(job: &Job, erase: bool, catalog: &Catalog, args: &Args, ui: &Ui) -> R
     let image = image::Image::read(&path)?;
     let mut erase = erase;
     if !erase
-        && job
-            .target
-            .running
-            .as_ref()
-            .is_some_and(|running| plan::files_move(board, running, &job.variant, image.filesystem))
+        && target.running.as_ref().is_some_and(|running| {
+            plan::files_move(&board, running, &build.variant, image.filesystem)
+        })
     {
         if args.yes {
             bail!(
@@ -733,16 +771,16 @@ fn execute(job: &Job, erase: bool, catalog: &Catalog, args: &Args, ui: &Ui) -> R
             ui,
             &format!(
                 "{}: the new build keeps board files elsewhere; they will be lost. Erase the whole chip?",
-                job.port()
+                target.port.name
             ),
         )? {
-            return Ok(Outcome::Skipped);
+            return Ok(false);
         }
         erase = true;
     }
-    flash(&job.target, &path, erase, ui)?;
+    flash(target, &path, erase, ui)?;
     ui.live("reboot", "waiting for the board");
-    let port = wait_port(&job.target.port)?;
+    let port = wait_port(&target.port)?;
     let running = repl::probe(&port.name, port.native())?
         .context("Firmware was written, but MicroPython did not answer; power-cycle the board")?;
     ensure!(
@@ -753,26 +791,81 @@ fn execute(job: &Job, erase: bool, catalog: &Catalog, args: &Args, ui: &Ui) -> R
     );
     if !running.build.is_empty() {
         ensure!(
-            plan::running_variant(board, &running) == Some(job.variant.as_str()),
+            plan::running_variant(&board, &running) == Some(build.variant.as_str()),
             "The board reports build {}, expected {board}-{}",
             running.build,
-            variant_name(&job.variant)
+            variant_name(&build.variant)
         );
     }
-    if port.name != job.target.port.name {
+    if port.name != target.port.name {
         ui.field("port", format!("{} (reconnected)", port.name), Tone::Normal);
     }
+    target.port = port;
+    target.running = Some(running);
+    Ok(true)
+}
+
+/// Writes the selected firmware and checks that the board runs it.
+/// With a PSRAM trial, the SPIRAM build goes first and stays only if the board reports PSRAM.
+fn execute(job: &Job, erase: bool, catalog: &Catalog, args: &Args, ui: &Ui) -> Result<Outcome> {
+    let mut target = job.target.clone();
+    let mut build = job.build();
+    if let Psram::Trial(trial) = job.psram {
+        let spiram = &job.builds[trial];
+        ui.field(
+            "psram",
+            format!("checking with {}", build_name(job.board(), trial)),
+            Tone::Active,
+        );
+        if !install(&mut target, spiram, erase, catalog, args, ui)? {
+            return Ok(Outcome::Skipped);
+        }
+        let found = target.running.as_ref().map_or(0, |running| running.psram);
+        if found > 0 {
+            ui.field(
+                "psram",
+                format!("{} MB found · keeping {trial}", found / 1024 / 1024),
+                Tone::Good,
+            );
+            build = spiram;
+        } else {
+            ui.field(
+                "psram",
+                format!(
+                    "none found · writing {}",
+                    build_name(job.board(), &job.variant)
+                ),
+                Tone::Normal,
+            );
+            if !install(&mut target, build, false, catalog, args, ui)? {
+                ui.warning(&format!(
+                    "{}: keeping {}; it also runs without PSRAM",
+                    job.port(),
+                    build_name(job.board(), trial)
+                ));
+                build = spiram;
+            }
+        }
+    } else if !install(&mut target, build, erase, catalog, args, ui)? {
+        return Ok(Outcome::Skipped);
+    }
+    let running = target
+        .running
+        .as_ref()
+        .context("The board did not report its firmware")?;
     ui.field(
         "ready",
         format!("MicroPython {} is running", running.version),
         Tone::Good,
     );
-    Ok(match job.change() {
-        Change::Install => Outcome::Installed,
-        Change::WrongBuild => Outcome::BuildFixed,
-        Change::Update => Outcome::Updated,
-        _ => Outcome::Reflashed,
-    })
+    Ok(
+        match plan::classify(job.board(), job.target.running.as_ref(), build) {
+            Change::Install => Outcome::Installed,
+            Change::WrongBuild => Outcome::BuildFixed,
+            Change::Update => Outcome::Updated,
+            _ => Outcome::Reflashed,
+        },
+    )
 }
 
 /// Shows a board's result and adds it to the run report.
@@ -1193,6 +1286,7 @@ snapshot('/')
                 builds: builds.clone(),
                 online: false,
                 variant: variant.clone(),
+                psram: Psram::Decided,
             };
             let options = FlashOptions {
                 force: true,

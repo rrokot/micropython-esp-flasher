@@ -19,6 +19,13 @@ pub struct Running {
     pub filesystem: Option<u32>,
 }
 
+impl Running {
+    /// The running build supports SPIRAM, so its PSRAM size is a real measurement.
+    pub fn spiram(&self) -> bool {
+        self.build.contains("SPIRAM") || self.machine.contains("SPIRAM")
+    }
+}
+
 const PROBE: &str = r#"import os, sys
 u = os.uname()
 print('version=' + u.version.split()[0][1:])
@@ -365,6 +372,15 @@ mod tests {
         let older = parse_probe("version=1.13\nbuild=\n").unwrap();
         assert_eq!(older.filesystem, None);
         assert_eq!(older.psram, 0);
+        assert!(running.spiram() && !older.spiram());
+        let wrover = parse_probe(
+            "version=1.29.0
+machine=Generic ESP32 module with SPIRAM with ESP32
+build=
+",
+        )
+        .unwrap();
+        assert!(wrover.spiram());
         assert!(parse_probe("version=garbage\n").is_err());
         assert!(parse_probe("machine=ESP32\n").is_err());
     }

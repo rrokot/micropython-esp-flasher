@@ -242,6 +242,43 @@ pub fn select_variant(builds: &Builds, hardware: &[String], online: bool) -> Res
     bail!("The expected firmware build is not available")
 }
 
+/// How the build choice handles PSRAM that cannot be detected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Psram {
+    /// PSRAM is known, the build was chosen by hand, or there is no SPIRAM build to weigh.
+    Decided,
+    /// No MicroPython yet: write this SPIRAM build first and keep it only if the board finds PSRAM.
+    /// It also starts without PSRAM, so a board without it then gets the selected base build.
+    Trial(&'static str),
+    /// MicroPython is installed: its build stays the reference, since PSRAM cannot be confirmed.
+    Installed,
+}
+
+/// Decides how to treat unknown PSRAM (`psram` is None) for an automatically selected build.
+pub fn psram_choice(
+    builds: &Builds,
+    selected: &str,
+    psram: Option<bool>,
+    installed: bool,
+) -> Psram {
+    const TRIAL: &str = "SPIRAM";
+    let Some(trial) = builds.get(TRIAL) else {
+        return Psram::Decided;
+    };
+    if psram.is_some() || !selected.is_empty() {
+        Psram::Decided
+    } else if installed {
+        Psram::Installed
+    } else if builds
+        .get("")
+        .is_some_and(|base| base.version == trial.version)
+    {
+        Psram::Trial(TRIAL)
+    } else {
+        Psram::Decided
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +324,50 @@ mod tests {
             select_variant(&builds, &["FLASH_4M".into()], true).unwrap(),
             ""
         );
+    }
+
+    #[test]
+    fn unknown_psram_trials_spiram_on_empty_boards_and_trusts_installed_firmware() {
+        let builds = parse_builds(
+            "ESP32_GENERIC",
+            [
+                "ESP32_GENERIC-20260824-v1.29.0.bin",
+                "ESP32_GENERIC-SPIRAM-20260824-v1.29.0.bin",
+                "ESP32_GENERIC-D2WD-20260824-v1.29.0.bin",
+            ],
+        );
+        assert_eq!(
+            psram_choice(&builds, "", None, false),
+            Psram::Trial("SPIRAM")
+        );
+        assert_eq!(psram_choice(&builds, "", None, true), Psram::Installed);
+        for installed in [false, true] {
+            assert_eq!(
+                psram_choice(&builds, "", Some(false), installed),
+                Psram::Decided
+            );
+            assert_eq!(
+                psram_choice(&builds, "", Some(true), installed),
+                Psram::Decided
+            );
+            assert_eq!(
+                psram_choice(&builds, "D2WD", None, installed),
+                Psram::Decided
+            );
+        }
+        let older = parse_builds(
+            "ESP32_GENERIC",
+            [
+                "ESP32_GENERIC-20260824-v1.29.0.bin",
+                "ESP32_GENERIC-SPIRAM-20260101-v1.28.0.bin",
+            ],
+        );
+        assert_eq!(psram_choice(&older, "", None, false), Psram::Decided);
+        let s3 = parse_builds(
+            "ESP32_GENERIC_S3",
+            ["ESP32_GENERIC_S3-20260824-v1.29.0.bin"],
+        );
+        assert_eq!(psram_choice(&s3, "", None, true), Psram::Decided);
     }
 
     #[test]

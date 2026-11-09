@@ -88,7 +88,9 @@ pub struct Hardware {
     pub board: String,
     pub flash_size: u32,
     pub psram_mb: u32,
-    pub psram: bool,
+    /// None: unknown. eFuse reports only in-package PSRAM, and a build without SPIRAM
+    /// support cannot see a separate PSRAM chip such as the one on a WROVER module.
+    pub psram: Option<bool>,
     pub single_core: bool,
     pub package: Option<String>,
     pub mac: Option<String>,
@@ -103,7 +105,7 @@ impl Hardware {
         if self.single_core {
             names.push("UNICORE".into());
         }
-        if self.psram {
+        if self.psram == Some(true) {
             names.push("SPIRAM".into());
         }
         if self.psram_mb >= 8 {
@@ -111,6 +113,11 @@ impl Hardware {
         }
         names
     }
+}
+
+/// Chips whose modules can carry a separate PSRAM chip that eFuse does not report.
+fn external_psram(chip: Chip) -> bool {
+    matches!(chip, Chip::Esp32 | Chip::Esp32s2)
 }
 
 pub struct Connected {
@@ -161,7 +168,7 @@ impl Connected {
             .map_err(|error| anyhow::anyhow!("Cannot identify board: {error}"))?;
         let chip = info.chip;
         let mut psram_mb = 0;
-        let mut psram = false;
+        let mut psram = None;
         let mut package = None;
         if chip == Chip::Esp32s3 {
             // espflash's generic feature text does not expose S3 RAM capacity.
@@ -177,16 +184,19 @@ impl Connected {
                 4 => 4,
                 _ => 0,
             };
-            psram = cap != 0;
+            psram = Some(cap != 0);
         } else {
             for feature in &info.features {
                 if feature.starts_with("Embedded PSRAM") {
-                    psram = true;
+                    psram = Some(true);
                     psram_mb = feature
                         .split_whitespace()
                         .find_map(|part| part.strip_suffix("MB").and_then(|v| v.parse().ok()))
                         .unwrap_or(0);
                 }
+            }
+            if psram.is_none() && !external_psram(chip) {
+                psram = Some(false);
             }
         }
         if chip == Chip::Esp32 {
@@ -204,7 +214,12 @@ impl Connected {
         }
         if let Some(running) = running {
             psram_mb = psram_mb.max((running.psram / 1024 / 1024) as u32);
-            psram |= running.psram > 0;
+            if running.psram > 0 {
+                psram = Some(true);
+            } else if running.spiram() {
+                // A SPIRAM build that found no PSRAM proves there is none.
+                psram.get_or_insert(false);
+            }
         }
         let suffix = chip.to_string().replace('-', "").to_uppercase();
         let suffix = suffix
@@ -340,7 +355,7 @@ mod tests {
             board: "ESP32_GENERIC".into(),
             flash_size: 2 * 1024 * 1024,
             psram_mb: 8,
-            psram: true,
+            psram: Some(true),
             single_core: true,
             package: Some("D2WD".into()),
             mac: None,
@@ -349,5 +364,13 @@ mod tests {
             h.names(),
             ["FLASH_2M", "D2WD", "UNICORE", "SPIRAM", "SPIRAM_OCT"]
         );
+        for psram in [None, Some(false)] {
+            let h = Hardware {
+                psram,
+                psram_mb: 0,
+                ..h.clone()
+            };
+            assert_eq!(h.names(), ["FLASH_2M", "D2WD", "UNICORE"]);
+        }
     }
 }
